@@ -60,18 +60,27 @@ if not st.session_state.authenticated:
     st.stop()
 
 # --- 3. GEMINI KI-INITIALISIERUNG (Sicherer Modus) ---
+# --- 3. GEMINI KI-INITIALISIERUNG (Kugelsicher) ---
 api_key_env = st.secrets.get("GEMINI_API_KEY")
 
 if not api_key_env:
-    # Fallback, falls Secrets nicht gesetzt sind
     api_key_env = st.sidebar.text_input("Gemini API Key manuell eingeben", type="password")
 
 if api_key_env:
     try:
         genai.configure(api_key=api_key_env)
-        model = genai.GenerativeModel('gemini-1.5-flash')
+        
+        # Wir versuchen die stabilste Version: gemini-1.5-flash
+        # Falls das nicht geht, nimmt er die 'latest' Version
+        try:
+            model = genai.GenerativeModel('gemini-1.5-flash')
+            # Kurzer Check, ob das Modell antwortet
+            model.generate_content("test") 
+        except:
+            model = genai.GenerativeModel('gemini-1.5-flash-latest')
+            
     except Exception as e:
-        st.error(f"KI-Fehler: {e}")
+        st.error(f"KI-Verbindungsfehler: {e}")
         st.stop()
 else:
     st.warning("⚠️ Warte auf API-Key. Bitte in Streamlit Secrets hinterlegen.")
@@ -160,3 +169,4 @@ if nt_file and os.path.exists(lv_storage):
 else:
     if not os.path.exists(lv_storage):
         st.info("💡 Bitte lade zuerst das Haupt-LV in der Sidebar hoch, um eine Vergleichsbasis zu haben.")
+
