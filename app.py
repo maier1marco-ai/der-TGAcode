@@ -168,16 +168,47 @@ if nt_file and os.path.exists(lv_storage):
         st.markdown(st.session_state.audit_text)
         st.markdown('</div>', unsafe_allow_html=True)
 
-        # --- CHAT ASSISTENT ---
+       # --- 6. DER UNIVERSELLE TGA-CHAT ---
         st.divider()
-        st.subheader("🤖 Schriftverkehr-Assistent")
-        cmd = st.chat_input("z.B.: 'Erstelle ein Ablehnungsschreiben wegen fehlender Kalkulation'")
-        if cmd:
-            with st.spinner("Formuliere Dokument..."):
-                chat_res = model.generate_content(f"Bericht: {st.session_state.audit_text}\nBefehl: {cmd}\nStil: Bauleiter, VOB-konform.")
-                st.info(chat_res.text)
-else:
-    if not os.path.exists(lv_storage):
-        st.info("💡 Bitte lade zuerst das Haupt-LV in der Sidebar hoch, um eine Vergleichsbasis zu haben.")
+        st.subheader("🤖 der TGAcode | Projekt-Dialog")
+        st.info("Hier kannst du Dokumente entwerfen, Logik prüfen oder VOB-Strategien besprechen.")
+
+        # Chat-Historie initialisieren
+        if "chat_history" not in st.session_state:
+            st.session_state.chat_history = []
+
+        # Anzeige der bisherigen Chatverläufe
+        for message in st.session_state.chat_history:
+            with st.chat_message(message["role"]):
+                st.markdown(message["content"])
+
+        # Benutzereingabe
+        user_input = st.chat_input("Frag mich etwas zum Projekt...")
+
+        if user_input:
+            # User-Nachricht anzeigen & speichern
+            with st.chat_message("user"):
+                st.markdown(user_input)
+            st.session_state.chat_history.append({"role": "user", "content": user_input})
+
+            # Antwort generieren mit vollem Kontext
+            with st.chat_message("assistant"):
+                with st.spinner("Denke nach..."):
+                    # Wir geben der KI ALLES: Audit-Bericht + deine Frage
+                    full_context = f"""
+                    Du bist der leitende TGA-Experte für das Projekt {projekt}.
+                    Hier ist der aktuelle Revisionsbericht:
+                    {st.session_state.audit_text}
+                    
+                    Nutze diesen Bericht und dein gesamtes Wissen über VOB, HOAI und TGA-Normen, 
+                    um die folgende Nutzeranfrage zu beantworten oder Dokumente zu erstellen:
+                    {user_input}
+                    """
+                    
+                    response = model.generate_content(full_context)
+                    st.markdown(response.text)
+            
+            st.session_state.chat_history.append({"role": "assistant", "content": response.text})
+
 
 
