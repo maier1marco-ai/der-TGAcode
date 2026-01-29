@@ -59,8 +59,7 @@ if not st.session_state.authenticated:
         st.markdown('</div>', unsafe_allow_html=True)
     st.stop()
 
-# --- 3. GEMINI KI-INITIALISIERUNG (Sicherer Modus) ---
-# --- 3. GEMINI KI-INITIALISIERUNG (Kugelsicher) ---
+# --- 3. GEMINI KI-INITIALISIERUNG (Auto-Detection Modus) ---
 api_key_env = st.secrets.get("GEMINI_API_KEY")
 
 if not api_key_env:
@@ -70,20 +69,31 @@ if api_key_env:
     try:
         genai.configure(api_key=api_key_env)
         
-        # Wir versuchen die stabilste Version: gemini-1.5-flash
-        # Falls das nicht geht, nimmt er die 'latest' Version
-        try:
-            model = genai.GenerativeModel('gemini-1.5-flash')
-            # Kurzer Check, ob das Modell antwortet
-            model.generate_content("test") 
-        except:
-            model = genai.GenerativeModel('gemini-1.5-flash-latest')
+        # Wir listen alle verfügbaren Modelle auf und suchen nach einem Flash-Modell
+        available_models = [m.name for m in genai.list_models() if 'generateContent' in m.supported_generation_methods]
+        
+        # Bevorzugte Modelle in dieser Reihenfolge
+        choices = ['models/gemini-1.5-flash', 'models/gemini-1.5-flash-latest', 'models/gemini-pro']
+        
+        selected_model = None
+        for choice in choices:
+            if choice in available_models:
+                selected_model = choice
+                break
+        
+        if not selected_model:
+            # Falls keins der Liste gefunden wurde, nimm das erste verfügbare
+            selected_model = available_models[0]
             
+        model = genai.GenerativeModel(selected_model)
+        st.sidebar.success(f"Aktiv: {selected_model}") # Zeigt dir in der Sidebar, was er gefunden hat
+        
     except Exception as e:
-        st.error(f"KI-Verbindungsfehler: {e}")
+        st.error(f"Verbindungsfehler zur Google API: {e}")
+        st.info("Tipp: Prüfe, ob dein API-Key im Google AI Studio wirklich 'Active' ist.")
         st.stop()
 else:
-    st.warning("⚠️ Warte auf API-Key. Bitte in Streamlit Secrets hinterlegen.")
+    st.warning("⚠️ Bitte Gemini API Key in den Streamlit Secrets hinterlegen.")
     st.stop()
 
 # --- 4. PROJEKT-ARCHIV (Sidebar) ---
@@ -169,4 +179,5 @@ if nt_file and os.path.exists(lv_storage):
 else:
     if not os.path.exists(lv_storage):
         st.info("💡 Bitte lade zuerst das Haupt-LV in der Sidebar hoch, um eine Vergleichsbasis zu haben.")
+
 
