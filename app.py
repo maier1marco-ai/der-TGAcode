@@ -1,214 +1,164 @@
 import streamlit as st
 import google.generativeai as genai
 from PyPDF2 import PdfReader
+from fpdf import FPDF
 import os
+import json
+from datetime import datetime
 
-# --- 1. DESIGN & BRANDING (Futuristic UI) ---
-st.set_page_config(page_title="der TGAcode", layout="wide", initial_sidebar_state="expanded")
+# --- 1. SETTINGS & STYLING ---
+st.set_page_config(page_title="der TGAcode | OS", layout="wide", initial_sidebar_state="expanded")
 
+# Futuristisches UI-Update
 st.markdown("""
     <style>
-    /* Hintergrund und Grundfarben */
-    .main { background-color: #0e1117; color: #ffffff; }
-    
-    /* Buttons: Neon-Gradient */
+    @import url('https://fonts.googleapis.com/css2?family=Orbitron:wght@400;700&display=swap');
+    .main { background-color: #050a0f; color: #e0e0e0; }
+    .stSidebar { background-color: #0a1118 !important; border-right: 1px solid #00f2fe; }
+    h1, h2, h3 { font-family: 'Orbitron', sans-serif; color: #00f2fe; text-transform: uppercase; }
     .stButton>button { 
-        background: linear-gradient(45deg, #00f2fe 0%, #4facfe 100%); 
-        color: white; border: none; border-radius: 10px;
-        padding: 10px 25px; font-weight: bold; transition: 0.3s;
-        width: 100%;
+        background: linear-gradient(90deg, #00f2fe, #4facfe); 
+        color: black; border-radius: 5px; border: none; font-weight: bold;
+        transition: 0.5s; box-shadow: 0 0 10px #00f2fe;
     }
-    .stButton>button:hover { transform: scale(1.02); box-shadow: 0px 0px 15px #00f2fe; }
-    
-    /* Eingabefelder */
-    .stTextInput>div>div>input { background-color: #1a1c24; color: white; border: 1px solid #4facfe; }
-    
-    /* Titel-Styling */
-    h1 { color: #00f2fe; font-family: 'Helvetica Neue', sans-serif; letter-spacing: 2px; text-transform: uppercase; text-shadow: 0 0 10px rgba(0,242,254,0.5); }
-    
-    /* Karten-Design für Uploads und Ergebnisse */
-    .report-card { 
-        background: rgba(255, 255, 255, 0.03); 
-        backdrop-filter: blur(10px); 
-        border-radius: 15px; padding: 25px; 
-        border: 1px solid rgba(0, 242, 254, 0.2);
-        margin-bottom: 20px;
+    .stButton>button:hover { box-shadow: 0 0 25px #00f2fe; transform: translateY(-2px); }
+    .project-card { 
+        background: rgba(0, 242, 254, 0.05); border-left: 5px solid #00f2fe;
+        padding: 15px; margin-bottom: 10px; border-radius: 5px;
     }
-    
-    /* Sidebar Styling */
-    .css-163ttbj { background-color: #1a1c24; border-right: 1px solid #4facfe; }
     </style>
     """, unsafe_allow_html=True)
 
-# --- 2. AUTHENTIFIZIERUNG ---
-if "authenticated" not in st.session_state:
-    st.session_state.authenticated = False
+# --- 2. DATENSPEICHER LOGIK ---
+DB_ROOT = "tgacode_db"
+if not os.path.exists(DB_ROOT):
+    os.makedirs(DB_ROOT)
 
-if not st.session_state.authenticated:
-    st.markdown("<br><br><center><h1>der TGAcode</h1><p>ENGINEERING REVISION SYSTEM</p></center>", unsafe_allow_html=True)
-    col_a, col_b, col_c = st.columns([1,2,1])
-    with col_b:
-        st.markdown('<div class="report-card">', unsafe_allow_html=True)
-        pw = st.text_input("System-Key (Passwort)", type="password")
-        if st.button("SYSTEM INITIALISIEREN"):
-            if pw == "TGAPRO": # <--- Dein Passwort
-                st.session_state.authenticated = True
-                st.rerun()
-            else:
-                st.error("Key ungültig.")
-        st.markdown('</div>', unsafe_allow_html=True)
+def save_project_data(firma, projekt, content, filename):
+    path = os.path.join(DB_ROOT, firma, projekt)
+    os.makedirs(path, exist_ok=True)
+    with open(os.path.join(path, filename), "w", encoding="utf-8") as f:
+        f.write(content)
+
+def load_project_data(firma, projekt, filename):
+    path = os.path.join(DB_ROOT, firma, projekt, filename)
+    if os.path.exists(path):
+        with open(path, "r", encoding="utf-8") as f:
+            return f.read()
+    return None
+
+# --- 3. AUTH & KI SETUP ---
+if "auth" not in st.session_state: st.session_state.auth = False
+
+if not st.session_state.auth:
+    st.markdown("<center><h1 style='font-size: 60px;'>der TGAcode</h1></center>", unsafe_allow_html=True)
+    pw = st.text_input("Enter Access Key", type="password")
+    if st.button("UNLOCK SYSTEM"):
+        if pw == "TGAPRO": 
+            st.session_state.auth = True
+            st.rerun()
     st.stop()
 
-# --- 3. GEMINI KI-INITIALISIERUNG (Auto-Detection Modus) ---
-api_key_env = st.secrets.get("GEMINI_API_KEY")
-
-if not api_key_env:
-    api_key_env = st.sidebar.text_input("Gemini API Key manuell eingeben", type="password")
-
-if api_key_env:
-    try:
-        genai.configure(api_key=api_key_env)
-        
-        # Wir listen alle verfügbaren Modelle auf und suchen nach einem Flash-Modell
-        available_models = [m.name for m in genai.list_models() if 'generateContent' in m.supported_generation_methods]
-        
-        # Bevorzugte Modelle in dieser Reihenfolge
-        choices = ['models/gemini-1.5-flash', 'models/gemini-1.5-flash-latest', 'models/gemini-pro']
-        
-        selected_model = None
-        for choice in choices:
-            if choice in available_models:
-                selected_model = choice
-                break
-        
-        if not selected_model:
-            # Falls keins der Liste gefunden wurde, nimm das erste verfügbare
-            selected_model = available_models[0]
-            
-        model = genai.GenerativeModel(selected_model)
-        st.sidebar.success(f"Aktiv: {selected_model}") # Zeigt dir in der Sidebar, was er gefunden hat
-        
-    except Exception as e:
-        st.error(f"Verbindungsfehler zur Google API: {e}")
-        st.info("Tipp: Prüfe, ob dein API-Key im Google AI Studio wirklich 'Active' ist.")
-        st.stop()
+# KI Initialisierung
+api_key = st.secrets.get("GEMINI_API_KEY")
+if api_key:
+    genai.configure(api_key=api_key)
+    model = genai.GenerativeModel('gemini-1.5-flash-latest')
 else:
-    st.warning("⚠️ Bitte Gemini API Key in den Streamlit Secrets hinterlegen.")
+    st.error("API Key missing in Secrets!")
     st.stop()
 
-# --- 4. PROJEKT-ARCHIV (Sidebar) ---
-st.sidebar.markdown("<h1>der TGAcode</h1>", unsafe_allow_html=True)
-firma = st.sidebar.text_input("🏢 Firma", "Beispiel_Firma")
-projekt = st.sidebar.text_input("📂 Projekt", "Projekt_01")
+# --- 4. SIDEBAR: PROJEKT-VERWALTUNG ---
+st.sidebar.title("🏢 Projekt-Center")
+firmen_liste = [f for f in os.listdir(DB_ROOT) if os.path.isdir(os.path.join(DB_ROOT, f))]
+neue_firma = st.sidebar.text_input("+ Neue Firma")
+if st.sidebar.button("Firma anlegen"):
+    if neue_firma: os.makedirs(os.path.join(DB_ROOT, neue_firma), exist_ok=True); st.rerun()
 
-# Pfad-Logik
-base_path = f"data/{firma}/{projekt}"
-os.makedirs(base_path, exist_ok=True)
-lv_storage = os.path.join(base_path, "basis_lv.txt")
+auswahl_firma = st.sidebar.selectbox("Firma wählen", ["Bitte wählen"] + firmen_liste)
 
-st.sidebar.divider()
-st.sidebar.subheader("Vertrags-Basis (LV)")
-lv_file = st.sidebar.file_uploader("LV hochladen", type="pdf", key="lv_up")
+auswahl_projekt = "Bitte wählen"
+if auswahl_firma != "Bitte wählen":
+    projekte = os.listdir(os.path.join(DB_ROOT, auswahl_firma))
+    neues_pro = st.sidebar.text_input("+ Neues Projekt")
+    if st.sidebar.button("Projekt anlegen"):
+        if neues_pro: os.makedirs(os.path.join(DB_ROOT, auswahl_firma, neues_pro), exist_ok=True); st.rerun()
+    auswahl_projekt = st.sidebar.selectbox("Projekt wählen", ["Bitte wählen"] + projekte)
 
-if lv_file and st.sidebar.button("IM ARCHIV SICHERN"):
-    with st.spinner("Speichere LV..."):
-        text = "".join([p.extract_text() for p in PdfReader(lv_file).pages])
-        with open(lv_storage, "w", encoding="utf-8") as f:
-            f.write(text)
-        st.sidebar.success("Projekt-Wissen gesichert.")
+# --- 5. HAUPTBEREICH ---
+if auswahl_projekt != "Bitte wählen":
+    st.title(f"{auswahl_projekt} // {auswahl_firma}")
+    
+    tabs = st.tabs(["🚀 Dashboard", "📊 Revision", "🏗️ Objektüberwachung", "💬 Universal Chat"])
 
-# --- 5. HAUPT-DASHBOARD ---
-st.markdown(f"<h1>Revision: {projekt}</h1>", unsafe_allow_html=True)
+    # --- TAB 1: DASHBOARD (SPEICHERN) ---
+    with tabs[0]:
+        st.subheader("Projekt-Datenbank")
+        lv_upload = st.file_uploader("Vertrags-LV hochladen (Dauerhaft)", type="pdf")
+        if lv_upload and st.button("In Datenbank archivieren"):
+            text = "".join([p.extract_text() for p in PdfReader(lv_upload).pages])
+            save_project_data(auswahl_firma, auswahl_projekt, text, "lv_basis.txt")
+            st.success("LV dauerhaft gespeichert.")
+        
+        saved_lv = load_project_data(auswahl_firma, auswahl_projekt, "lv_basis.txt")
+        if saved_lv:
+            st.info("✅ Vertrags-LV ist im System hinterlegt.")
 
-col1, col2 = st.columns(2)
-with col1:
-    st.markdown('<div class="report-card">', unsafe_allow_html=True)
-    st.subheader("📄 Nachtrags-Dokument")
-    nt_file = st.file_uploader("Nachtrag zur Prüfung (Temporär)", type="pdf")
-    st.markdown('</div>', unsafe_allow_html=True)
+    # --- TAB 3: OBJEKTÜBERWACHUNG ---
+    with tabs[2]:
+        st.subheader("Abnahme & Begehung")
+        gewerk = st.selectbox("Gewerk", ["Heizung", "Lüftung", "Sanitär", "Elektro"])
+        mangel = st.text_area("Mangelbeschreibung / Notiz")
+        if st.button("Mangel erfassen"):
+            timestamp = datetime.now().strftime("%Y-%m-%d %H:%M")
+            old_log = load_project_data(auswahl_firma, auswahl_projekt, "mangel_log.txt") or ""
+            new_log = old_log + f"\n[{timestamp}] {gewerk}: {mangel}"
+            save_project_data(auswahl_firma, auswahl_projekt, new_log, "mangel_log.txt")
+            st.success("Notiz gespeichert.")
+        
+        st.text_area("Protokoll-Historie", load_project_data(auswahl_firma, auswahl_projekt, "mangel_log.txt") or "Keine Einträge", height=200)
 
-with col2:
-    st.markdown('<div class="report-card">', unsafe_allow_html=True)
-    st.subheader("📎 Anlagen")
-    an_files = st.file_uploader("Kalkulationen / Nachweise", type="pdf", accept_multiple_files=True)
-    st.markdown('</div>', unsafe_allow_html=True)
-
-if nt_file and os.path.exists(lv_storage):
-    if st.button("🚀 FULL AUDIT STARTEN"):
-        with st.spinner("KI führt Deep-Analysis durch..."):
-            # Daten lesen
-            with open(lv_storage, "r", encoding="utf-8") as f:
-                lv_data = f.read()
-            nt_data = "".join([p.extract_text() for p in PdfReader(nt_file).pages])
-            at_data = "".join(["".join([p.extract_text() for p in PdfReader(a).pages]) for a in an_files])
-
-            prompt = f"""
-            DU BIST TGA-REVISOR. ARBEITE STRENG NACH VOB UND HOAI LP 08.
-            AUFGABE: Vergleiche den Nachtrag mit dem LV.
-            
-            PRÜFSCHRITTE:
-            1. VOLLSTÄNDIGKEIT: Fehlen Dokumente (Kalkulation, Aufmaß)?
-            2. ANSPRUCH: Ist die Leistung im LV enthalten? (LV-Pos nennen). Wenn nein: Zusatzleistung?
-            3. PREIS-CHECK: Vergleiche EP Nachtrag mit EP LV. Berechne Abweichung (€ / %).
-            4. KALKULATION: Ist die Preisfortschreibung im Anhang plausibel?
-            
-            LV-BASIS: {lv_data[:12000]}
-            NACHTRAG: {nt_data[:5000]}
-            ANHÄNGE: {at_data[:4000]}
-            
-            AUSGABE: Erstelle eine Tabelle (Pos | Status | Feststellung | VOB-Begründung | Empfehlung).
-            Fasse die Gesamtkosten-Differenz am Ende kurz zusammen.
-            """
-            
-            response = model.generate_content(prompt)
-            st.session_state.audit_text = response.text
-
-    if "audit_text" in st.session_state:
-        st.markdown('<div class="report-card">', unsafe_allow_html=True)
-        st.markdown(st.session_state.audit_text)
-        st.markdown('</div>', unsafe_allow_html=True)
-
-       # --- 6. DER UNIVERSELLE TGA-CHAT ---
-        st.divider()
-        st.subheader("🤖 der TGAcode | Projekt-Dialog")
-        st.info("Hier kannst du Dokumente entwerfen, Logik prüfen oder VOB-Strategien besprechen.")
-
-        # Chat-Historie initialisieren
+    # --- TAB 4: UNIVERSAL CHAT (DAS HERZSTÜCK) ---
+    with tabs[3]:
         if "chat_history" not in st.session_state:
             st.session_state.chat_history = []
 
-        # Anzeige der bisherigen Chatverläufe
-        for message in st.session_state.chat_history:
-            with st.chat_message(message["role"]):
-                st.markdown(message["content"])
+        # System-Prompt für "echte" Persönlichkeit
+        system_logic = f"""
+        Du bist 'der TGAcode', ein Elite-KI-Experte für TGA, VOB und Objektüberwachung. 
+        Du bist locker, aber extrem kompetent. Du hilfst bei Nachträgen, Abnahmen und Schriftverkehr.
+        Kontext: Firma {auswahl_firma}, Projekt {auswahl_projekt}.
+        LV-Wissen: {saved_lv[:5000] if saved_lv else 'Noch kein LV hochgeladen.'}
+        """
 
-        # Benutzereingabe
-        user_input = st.chat_input("Frag mich etwas zum Projekt...")
+        for msg in st.session_state.chat_history:
+            with st.chat_message(msg["role"]): st.markdown(msg["content"])
 
-        if user_input:
-            # User-Nachricht anzeigen & speichern
-            with st.chat_message("user"):
-                st.markdown(user_input)
-            st.session_state.chat_history.append({"role": "user", "content": user_input})
+        prompt = st.chat_input("Lass uns über das Projekt sprechen...")
+        if prompt:
+            st.session_state.chat_history.append({"role": "user", "content": prompt})
+            with st.chat_message("user"): st.markdown(prompt)
 
-            # Antwort generieren mit vollem Kontext
             with st.chat_message("assistant"):
-                with st.spinner("Denke nach..."):
-                    # Wir geben der KI ALLES: Audit-Bericht + deine Frage
-                    full_context = f"""
-                    Du bist der leitende TGA-Experte für das Projekt {projekt}.
-                    Hier ist der aktuelle Revisionsbericht:
-                    {st.session_state.audit_text}
-                    
-                    Nutze diesen Bericht und dein gesamtes Wissen über VOB, HOAI und TGA-Normen, 
-                    um die folgende Nutzeranfrage zu beantworten oder Dokumente zu erstellen:
-                    {user_input}
-                    """
-                    
-                    response = model.generate_content(full_context)
-                    st.markdown(response.text)
-            
+                full_prompt = f"{system_logic}\n\nUser fragt: {prompt}"
+                response = model.generate_content(full_prompt)
+                st.markdown(response.text)
+                
+                # Check für PDF-Erstellungswunsch
+                if "pdf" in prompt.lower() or "protokoll" in prompt.lower():
+                    pdf = FPDF()
+                    pdf.add_page()
+                    pdf.set_font("Arial", size=12)
+                    pdf.cell(200, 10, txt="der TGAcode - Projektprotokoll", ln=1, align='C')
+                    pdf.ln(10)
+                    pdf.multi_cell(0, 10, txt=response.text.encode('latin-1', 'replace').decode('latin-1'))
+                    pdf_path = "bericht.pdf"
+                    pdf.output(pdf_path)
+                    with open(pdf_path, "rb") as f:
+                        st.download_button("📥 Generiertes PDF herunterladen", f, file_name=f"TGAcode_{auswahl_projekt}.pdf")
+
             st.session_state.chat_history.append({"role": "assistant", "content": response.text})
 
-
-
+else:
+    st.title("Willkommen beim TGAcode")
+    st.info("Bitte wähle links eine Firma und ein Projekt aus oder lege neue an.")
