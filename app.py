@@ -210,6 +210,3 @@ if sel_p != "--":
 
 if __name__ == "__main__":
     main()
-Alle Ergebnisse dienen ausschließlich als Entscheidungshilfe.
-""")
-
