@@ -2,158 +2,124 @@ import streamlit as st
 import google.generativeai as genai
 from PyPDF2 import PdfReader
 import os
-import base64
 
-# --- SETTINGS & THEME ---
-st.set_page_config(page_title="TGAcode OS | Professional Edition", layout="wide")
+# --- 1. DESIGN SYSTEM (der TGAcode Style) ---
+st.set_page_config(page_title="der TGAcode", layout="wide")
 
-# CSS für Animationen und echtes Web-Design (Inspiration: tgacode.com)
 st.markdown("""
     <style>
-    @import url('https://fonts.googleapis.com/css2?family=Inter:wght@300;400;700;800&display=swap');
-    
-    html, body, [class*="css"] { font-family: 'Inter', sans-serif; }
-    
-    .stApp { background-color: #ffffff; }
-    
-    /* Fade-In Animation */
-    @keyframes fadeIn { from { opacity: 0; transform: translateY(10px); } to { opacity: 1; transform: translateY(0); } }
-    .stTabs, .tgacode-card, h1 { animation: fadeIn 0.8s ease-out; }
-
-    /* Header Styling */
-    .main-header {
-        background: linear-gradient(90deg, #1a1c24 0%, #2d313d 100%);
-        padding: 40px;
-        border-radius: 0 0 20px 20px;
+    /* Top Navigation Style */
+    .top-nav {
+        background-color: #1a1c24;
+        padding: 15px 30px;
+        display: flex;
+        justify-content: space-between;
+        align-items: center;
         color: white;
+        border-bottom: 3px solid #00f2fe;
         margin-bottom: 30px;
-        box-shadow: 0 10px 30px rgba(0,0,0,0.1);
     }
-
-    /* Interaktive Kacheln */
-    .feature-card {
-        background: #f8fafc;
-        border: 1px solid #e2e8f0;
-        padding: 25px;
-        border-radius: 12px;
-        transition: all 0.3s ease;
-        cursor: pointer;
-    }
-    .feature-card:hover {
-        border-color: #00f2fe;
-        background: #ffffff;
-        box-shadow: 0 15px 30px rgba(0, 242, 254, 0.1);
-        transform: translateY(-5px);
-    }
-
-    /* Buttons wie auf tgacode.com */
+    .main { background-color: #ffffff; }
+    
+    /* Buttons & Inputs */
     .stButton>button {
-        background: #1a1c24;
-        color: #00f2fe;
-        border: 2px solid #00f2fe;
-        border-radius: 50px;
-        padding: 10px 25px;
-        font-weight: 700;
-        text-transform: uppercase;
-        letter-spacing: 1px;
-        transition: 0.4s;
+        background: #1a1c24; color: #00f2fe; border: 1px solid #00f2fe;
+        border-radius: 4px; padding: 10px 20px; font-weight: bold;
     }
-    .stButton>button:hover {
-        background: #00f2fe;
-        color: #1a1c24;
-        box-shadow: 0 0 20px rgba(0, 242, 254, 0.4);
+    .stButton>button:hover { background: #00f2fe; color: #1a1c24; }
+    
+    /* Verstecke die Standard Sidebar */
+    [data-testid="stSidebar"] { display: none; }
+    [data-testid="stHeader"] { display: none; }
+    
+    /* Karten-Design */
+    .content-card {
+        border: 1px solid #e2e8f0; padding: 25px; border-radius: 8px;
+        box-shadow: 0 4px 12px rgba(0,0,0,0.05); background: white;
     }
     </style>
+    
+    <div class="top-nav">
+        <div style="font-size: 24px; font-weight: 800;">der <span style="color:#00f2fe;">TGAcode</span></div>
+        <div style="font-size: 14px; opacity: 0.7;">DIGITAL ENGINEERING & OBJEKTÜBERWACHUNG</div>
+    </div>
     """, unsafe_allow_html=True)
 
-# --- LOGIK & SPEICHER ---
-VAULT = "tgacode_vault"
+# --- 2. DATEN-STRUKTUR ---
+VAULT = "vault_tgacode"
 if not os.path.exists(VAULT): os.makedirs(VAULT)
 
 def main():
-    # --- HERO SECTION ---
-    st.markdown("""
-        <div class="main-header">
-            <h1 style='margin:0; font-size: 3rem;'>TGA<span style='color:#00f2fe;'>code</span> OS</h1>
-            <p style='opacity: 0.8; font-weight: 300;'>Die intelligente Schaltzentrale für Ihre Objektüberwachung.</p>
-        </div>
-    """, unsafe_allow_html=True)
-
-    # --- SIDEBAR (Minimalist & Clean) ---
-    with st.sidebar:
-        st.markdown("### 🏢 NAVIGATION")
+    # --- PROJEKT SELEKTOR & ERSTELLUNG (Kreative Kacheln) ---
+    col1, col2, col3 = st.columns([1, 1, 1])
+    
+    with col1:
+        st.subheader("Firma")
         firmen = [f for f in os.listdir(VAULT) if os.path.isdir(os.path.join(VAULT, f))]
-        sel_f = st.selectbox("MANDANT", ["--"] + firmen)
+        sel_f = st.selectbox("Wähle eine Firma", ["--"] + firmen, label_visibility="collapsed")
         
+        with st.expander("➕ Neue Firma erstellen"):
+            neue_f = st.text_input("Firmenname")
+            if st.button("Firma anlegen"):
+                if neue_f: os.makedirs(os.path.join(VAULT, neue_f)); st.rerun()
+
+    with col2:
+        st.subheader("Projekt")
         sel_p = "--"
         if sel_f != "--":
             projekte = [p for p in os.listdir(os.path.join(VAULT, sel_f))]
-            sel_p = st.selectbox("PROJEKT", ["--"] + projekte)
+            sel_p = st.selectbox("Wähle ein Projekt", ["--"] + projekte, label_visibility="collapsed")
             
-            if st.button("➕ NEUES PROJEKT/FIRMA"):
-                st.info("Funktion zum Anlegen folgt unten im Dashboard.")
+            with st.expander("➕ Neues Projekt erstellen"):
+                neues_p = st.text_input("Projektname")
+                if st.button("Projekt anlegen"):
+                    if neues_p: os.makedirs(os.path.join(VAULT, sel_f, neues_p)); st.rerun()
+        else:
+            st.info("Wähle zuerst eine Firma")
 
-    if sel_p == "--":
-        st.markdown("""
-            <div style='text-align:center; padding: 50px;'>
-                <h2 style='color:#cbd5e1;'>Willkommen zurück.</h2>
-                <p>Bitte wählen Sie ein Projekt in der Sidebar aus, um die Analyse zu starten.</p>
-            </div>
-        """, unsafe_allow_html=True)
-        # Kurze Demo-Kacheln (Visual Effekte)
-        c1, c2, c3 = st.columns(3)
-        c1.markdown("<div class='feature-card'><h3>🔍 Prüfung</h3><p>VOB-konforme Nachtragsanalyse in Sekunden.</p></div>", unsafe_allow_html=True)
-        c2.markdown("<div class='feature-card'><h3>📁 Akte</h3><p>Zentraler Speicher für LV, Pläne und Verträge.</p></div>", unsafe_allow_html=True)
-        c3.markdown("<div class='feature-card'><h3>💬 Chat</h3><p>Ihr KI-Partner mit vollem Projektwissen.</p></div>", unsafe_allow_html=True)
-        return
+    with col3:
+        st.subheader("Status")
+        if sel_p != "--":
+            st.success(f"Aktiv: {sel_p}")
+        else:
+            st.warning("Kein Projekt geladen")
 
-    # --- DASHBOARD ACTIONS ---
-    tab_audit, tab_vault, tab_ai = st.tabs(["🚀 NACHTRAGS-AUDIT", "📂 PROJEKT-AKTE", "🤖 KI-CORE"])
+    st.divider()
 
-    # --- TAB: VAULT (Verbesserter Multi-Upload) ---
-    with tab_vault:
-        st.markdown("### 📄 Dokumenten-Management")
-        p_path = os.path.join(VAULT, sel_f, sel_p)
-        if not os.path.exists(p_path): os.makedirs(p_path)
+    if sel_p != "--":
+        # --- HAUPTBEREICH NACH SELEKTION ---
+        t1, t2, t3 = st.tabs(["📄 Projekt-Akte", "🚀 Nachtragsprüfung", "💬 der TGAcode Chat"])
+        
+        path_p = os.path.join(VAULT, sel_f, sel_p)
 
-        col_up, col_list = st.columns([1, 1])
-        with col_up:
-            uploaded_files = st.file_uploader("Dokumente hinzufügen (LV, Vertrag, Anlagen...)", accept_multiple_files=True, type="pdf")
-            if st.button("IN AKTE SPEICHERN"):
-                for f in uploaded_files:
-                    with open(os.path.join(p_path, f.name), "wb") as file:
+        with t1:
+            st.markdown("<div class='content-card'>", unsafe_allow_html=True)
+            st.markdown("### Dokumente für dieses Projekt")
+            uploaded = st.file_uploader("LV, Vertrag, Pläne hochladen (Multi)", accept_multiple_files=True, type="pdf")
+            if st.button("Dokumente speichern"):
+                for f in uploaded:
+                    with open(os.path.join(path_p, f.name), "wb") as file:
                         file.write(f.getbuffer())
-                st.success("Dokumente archiviert!")
-                st.rerun()
+                st.success("Dokumente archiviert.")
+            
+            st.write("**Vorhandene Dateien:**")
+            for f in os.listdir(path_p): st.write(f"• {f}")
+            st.markdown("</div>", unsafe_allow_html=True)
 
-        with col_list:
-            st.write("**Aktuelle Projektakte:**")
-            for f in os.listdir(p_path):
-                st.markdown(f"📄 `{f}`")
+        with t2:
+            st.markdown("<div class='content-card'>", unsafe_allow_html=True)
+            st.markdown("### Nachtrag prüfen")
+            nt_files = st.file_uploader("Nachtrag + Anlagen hochladen", accept_multiple_files=True, type="pdf")
+            if st.button("VOB-Prüfung starten"):
+                # Hier greift die KI auf den gesamten Ordner path_p zu
+                st.info("Analysiere Nachtrag gegen Basis-Dokumente...")
+            st.markdown("</div>", unsafe_allow_html=True)
 
-    # --- TAB: AUDIT (Die echte KI-Prüfung) ---
-    with tab_audit:
-        st.markdown("### 🔬 Deep-Audit Analyse")
-        # Hier schalten wir die KI scharf
-        st.info("Die KI gleicht hier automatisch alle hochgeladenen Dokumente ab.")
-        if st.button("NACHTRAGS-PRÜFUNG STARTEN"):
-            # Logik: Lese ALLE PDFs im Ordner
-            # Sende an KI mit Befehl: "Du bist TGAcode Experte..."
-            st.write("Analysiere Daten...")
-
-    # --- TAB: KI-CORE (Vollständige Integration) ---
-    with tab_ai:
-        st.markdown("### 🤖 TGAcode KI-Assistent")
-        st.write("Ich habe Zugriff auf alle oben gelisteten Dokumente. Fragen Sie mich nach Details aus dem LV oder lassen Sie mich ein Schreiben entwerfen.")
-        
-        if "messages" not in st.session_state: st.session_state.messages = []
-        for m in st.session_state.messages:
-            with st.chat_message(m["role"]): st.markdown(m["content"])
-        
-        if prompt := st.chat_input("Fragen Sie den TGAcode..."):
-            st.session_state.messages.append({"role": "user", "content": prompt})
-            # KI-Antwort Logik hier einbinden
-            st.rerun()
+        with t3:
+            st.markdown("<div class='content-card'>", unsafe_allow_html=True)
+            st.markdown("### Chat mit der TGAcode KI")
+            # Chat Logik hier...
+            st.markdown("</div>", unsafe_allow_html=True)
 
 if __name__ == "__main__":
     main()
