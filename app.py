@@ -111,4 +111,4 @@ def main():
             st.chat_input("Anweisung an der TGAcode...")
 
 if __name__ == "__main__":
-    main()s
+    main()
