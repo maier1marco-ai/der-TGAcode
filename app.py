@@ -10,7 +10,6 @@ from sentence_transformers import SentenceTransformer
 # =========================================================
 st.set_page_config(page_title="der TGAcode", layout="wide")
 
-# CSS für den TGAcode Look
 st.markdown("""
 <style>
 .main { background-color: #ffffff; }
@@ -28,14 +27,17 @@ st.markdown("""
     width: 100%; font-weight: bold; border-radius: 4px; padding: 10px;
 }
 .stButton>button:hover { background: #00f2fe; color: #1a1c24; }
-code { color: #1a1c24; background: #f0f2f5; }
+.report-box { 
+    background-color: #f8fafc; padding: 20px; border-radius: 8px; 
+    border: 1px solid #e2e8f0; font-family: monospace;
+}
 </style>
 <div class="top-nav">
     <div class="logo">der <span class="accent">TGAcode</span></div>
 </div>
 """, unsafe_allow_html=True)
 
-# API Key aus Secrets (für Streamlit Cloud)
+# API Key & Modell
 api_key = st.secrets.get("GEMINI_API_KEY")
 if not api_key:
     st.error("❌ GEMINI_API_KEY fehlt in den Secrets.")
@@ -44,7 +46,6 @@ if not api_key:
 genai.configure(api_key=api_key)
 ai_model = genai.GenerativeModel("gemini-1.5-pro")
 
-# Vektor-Setup
 @st.cache_resource
 def load_embedder():
     return SentenceTransformer("all-MiniLM-L6-v2")
@@ -53,160 +54,132 @@ embedder = load_embedder()
 chroma = chromadb.Client()
 
 VAULT = "vault_tgacode"
-os.makedirs(VAULT, exist_ok=True)
+if not os.path.exists(VAULT):
+    os.makedirs(VAULT)
 
 # =========================================================
-# HILFSFUNKTIONEN
+# FUNKTIONEN
 # =========================================================
-def read_pdf(file_path):
+def read_pdf(file):
     text = ""
     try:
-        reader = PdfReader(file_path)
+        reader = PdfReader(file)
         for page in reader.pages:
             t = page.extract_text()
             if t: text += t + "\n"
-    except Exception as e:
-        st.error(f"Fehler beim Lesen von {file_path}: {e}")
+    except: pass
     return text
-
-def split_text(text, size=400):
-    words = text.split()
-    return [" ".join(words[i:i+size]) for i in range(0, len(words), size)]
 
 def index_project(project_path, project_id):
     collection = chroma.get_or_create_collection(project_id)
-    # Bestehende Daten für sauberen Neu-Index löschen
-    existing_ids = collection.get()["ids"]
-    if existing_ids:
-        collection.delete(ids=existing_ids)
-
+    existing = collection.get()
+    if existing["ids"]: collection.delete(ids=existing["ids"])
+    
     for f in os.listdir(project_path):
         if f.lower().endswith(".pdf"):
-            text = read_pdf(os.path.join(project_path, f))
-            chunks = split_text(text)
+            full_path = os.path.join(project_path, f)
+            text = read_pdf(full_path)
+            words = text.split()
+            chunks = [" ".join(words[i:i+400]) for i in range(0, len(words), 400)]
             if chunks:
                 collection.add(
                     ids=[f"{f}_{i}" for i in range(len(chunks))],
                     documents=chunks,
-                    embeddings=[embedder.encode(chunk).tolist() for chunk in chunks]
+                    embeddings=[embedder.encode(c).tolist() for c in chunks]
                 )
 
-def query_project(project_id, query, k=8):
+def query_project(project_id, query):
     try:
         collection = chroma.get_collection(project_id)
-        emb = embedder.encode(query).tolist()
-        result = collection.query(query_embeddings=[emb], n_results=k)
-        return "\n".join(result["documents"][0])
-    except:
-        return "Kein indexiertes Wissen gefunden."
+        res = collection.query(query_embeddings=[embedder.encode(query).tolist()], n_results=8)
+        return "\n".join(res["documents"][0])
+    except: return "Kein Basiswissen gefunden."
 
 # =========================================================
-# UI – PROJEKT-AUSWAHL
+# MAIN APP
 # =========================================================
-st.markdown("### Projekt-Auswahl")
-c1, c2, c3 = st.columns(3)
+def main():
+    st.markdown("### Projekt-Auswahl")
+    c1, c2, c3 = st.columns(3)
 
-firmen = [f for f in os.listdir(VAULT) if os.path.isdir(os.path.join(VAULT, f))]
-
-with c1:
-    sel_f = st.selectbox("Firma", ["--"] + firmen)
-    with st.expander("Firma anlegen"):
-        nf = st.text_input("Firmenname")
-        if st.button("Firma erstellen") and nf:
-            os.makedirs(os.path.join(VAULT, nf), exist_ok=True)
-            st.rerun()
-
-sel_p = "--"
-if sel_f != "--":
-    projekte = [p for p in os.listdir(os.path.join(VAULT, sel_f)) if os.path.isdir(os.path.join(VAULT, sel_f, p))]
-    with c2:
-        sel_p = st.selectbox("Projekt", ["--"] + projekte)
-        with st.expander("Projekt anlegen"):
-            np = st.text_input("Projektname")
-            if st.button("Projekt erstellen") and np:
-                os.makedirs(os.path.join(VAULT, sel_f, np), exist_ok=True)
+    firmen = [f for f in os.listdir(VAULT) if os.path.isdir(os.path.join(VAULT, f))]
+    
+    with c1:
+        sel_f = st.selectbox("Firma", ["--"] + firmen)
+        with st.expander("Firma anlegen"):
+            nf = st.text_input("Firmenname")
+            if st.button("Anlegen", key="new_f"):
+                os.makedirs(os.path.join(VAULT, nf), exist_ok=True)
                 st.rerun()
-else:
-    with c2: st.info("Bitte zuerst Firma wählen")
 
-with c3:
-    if sel_p != "--": st.success(f"Aktiv: {sel_p}")
-    else: st.warning("Kein Projekt aktiv")
+    sel_p = "--"
+    if sel_f != "--":
+        projekte = [p for p in os.listdir(os.path.join(VAULT, sel_f))]
+        with c2:
+            sel_p = st.selectbox("Projekt", ["--"] + projekte)
+            with st.expander("Projekt anlegen"):
+                np = st.text_input("Projektname")
+                if st.button("Anlegen", key="new_p"):
+                    os.makedirs(os.path.join(VAULT, sel_f, np), exist_ok=True)
+                    st.rerun()
+    
+    with c3:
+        if sel_p != "--": st.success(f"Aktiv: {sel_p}")
+        else: st.warning("Projekt wählen")
 
-st.divider()
+    st.divider()
 
-# =========================================================
-# ARBEITSBEREICH
-# =========================================================
-if sel_p != "--":
-    path_p = os.path.join(VAULT, sel_f, sel_p)
-    project_id = f"{sel_f}_{sel_p}".replace(" ", "_")
-
-    t1, t2 = st.tabs(["📁 Projekt-Akte", "🚀 Prüfung"])
-
-    with t1:
-        st.markdown("#### Projekt-Akte (LV, Vertrag, Pläne)")
-        uploads = st.file_uploader("PDFs hinzufügen", accept_multiple_files=True)
+    if sel_p != "--":
+        path_p = os.path.join(VAULT, sel_f, sel_p)
+        project_id = f"{sel_f}_{sel_p}".replace(" ", "_")
         
-        col_btn1, col_btn2 = st.columns(2)
-        if col_btn1.button("Dokumente speichern"):
-            for f in uploads:
-                with open(os.path.join(path_p, f.name), "wb") as out:
-                    out.write(f.getbuffer())
-            st.rerun()
+        t1, t2 = st.tabs(["📁 Projekt-Akte", "🚀 Prüfung"])
 
-        if col_btn2.button("📚 Projektwissen indexieren"):
-            with st.spinner("Indexiere Projekt-Akte..."):
-                index_project(path_p, project_id)
-            st.success("Wissen bereitgestellt.")
-
-        st.markdown("**Bestand:**")
-        for d in os.listdir(path_p):
-            cd, cx = st.columns([0.85, 0.15])
-            cd.code(d)
-            if cx.button("X", key=d):
-                os.remove(os.path.join(path_p, d))
+        with t1:
+            st.markdown("#### Dokumente verwalten")
+            up = st.file_uploader("PDFs hochladen", accept_multiple_files=True)
+            col_a, col_b = st.columns(2)
+            if col_a.button("Speichern"):
+                for f in up:
+                    with open(os.path.join(path_p, f.name), "wb") as o: o.write(f.getbuffer())
                 st.rerun()
-
-    with t2:
-        st.markdown("#### Nachtragsprüfung")
-        nt_files = st.file_uploader("Nachtrag + Anlagen hochladen", accept_multiple_files=True)
-
-        if st.button("🚀 Prüfung starten"):
-            if not nt_files:
-                st.warning("Kein Nachtrag gefunden.")
-                st.stop()
+            if col_b.button("Indexieren"):
+                index_project(path_p, project_id)
+                st.success("Wissen bereit.")
             
-            with st.spinner("der TGAcode analysiert..."):
-                # Nachtrag lesen
-                nt_text = ""
-                for f in nt_files:
-                    reader = PdfReader(f)
-                    for page in reader.pages:
-                        nt_text += (page.extract_text() or "") + "\n"
+            for d in os.listdir(path_p):
+                cx, cy = st.columns([0.9, 0.1])
+                cx.code(d)
+                if cy.button("X", key=d):
+                    os.remove(os.path.join(path_p, d))
+                    st.rerun()
 
-                # Kontext aus Projekt-Akte holen
-                kontext = query_project(project_id, nt_text[:2000]) # Nutze Anfang des Nachtrags für Suche
+        with t2:
+            st.markdown("#### Nachtrag prüfen")
+            nt_files = st.file_uploader("Nachtrag + Anlagen", accept_multiple_files=True)
+            
+            if st.button("Prüfung starten"):
+                with st.spinner("der TGAcode analysiert..."):
+                    nt_text = ""
+                    for f in nt_files: nt_text += read_pdf(f)
+                    kontext = query_project(project_id, nt_text[:1000])
+                    
+                    prompt = f"SYSTEM: Du bist 'der TGAcode'. Analysiere sachlich.\nKONTEXT:\n{kontext}\n\nNACHTRAG:\n{nt_text}\n\nSTRUKTUR: VOB-Check, Mengen-Check, Preis-Check, Empfehlung."
+                    res = ai_model.generate_content(prompt)
+                    st.session_state.last_audit = res.text
 
-                prompt = f"""
-                SYSTEM: Du bist 'der TGAcode'. Analysiere sachlich und streng nach VOB/B.
+            if "last_audit" in st.session_state:
+                st.markdown(f"<div class='report-box'>{st.session_state.last_audit}</div>", unsafe_allow_html=True)
                 
-                KONTEXT AUS PROJEKT-AKTE:
-                {kontext}
-
-                EINGEREICHTER NACHTRAG:
-                {nt_text}
-
-                STRUKTUR:
-                1. VERTRIEBLICHE/RECHTLICHE PRÜFUNG (VOB/B)
-                2. TECHNISCHE PLAUSIBILITÄT
-                3. PREISPRÜFUNG (TABELLE)
-                4. KONKRETE KÜRZUNGSEMPFEHLUNG
-                """
-                
-                result = ai_model.generate_content(prompt).text
-                st.markdown("### Prüfprotokoll")
-                st.markdown(result)
+                st.divider()
+                st.markdown("#### Chat-Anweisung zum Ergebnis")
+                feedback = st.chat_input("Anweisung an der TGAcode...")
+                if feedback:
+                    # Direkte Interaktion mit dem letzten Ergebnis
+                    new_prompt = f"Du hast diesen Bericht erstellt:\n{st.session_state.last_audit}\n\nAnweisung vom User: {feedback}\n\nÜberarbeite den Bericht entsprechend."
+                    new_res = ai_model.generate_content(new_prompt)
+                    st.session_state.last_audit = new_res.text
+                    st.rerun()
 
 if __name__ == "__main__":
     main()
