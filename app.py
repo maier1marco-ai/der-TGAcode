@@ -29,7 +29,7 @@ st.markdown("""
 .stButton>button:hover { background: #00f2fe; color: #1a1c24; }
 .report-box { 
     background-color: #f8fafc; padding: 20px; border-radius: 8px; 
-    border: 1px solid #e2e8f0; font-family: monospace;
+    border: 1px solid #e2e8f0; line-height: 1.6;
 }
 </style>
 <div class="top-nav">
@@ -37,14 +37,24 @@ st.markdown("""
 </div>
 """, unsafe_allow_html=True)
 
-# API Key & Modell
+# API Key Check
 api_key = st.secrets.get("GEMINI_API_KEY")
 if not api_key:
     st.error("❌ GEMINI_API_KEY fehlt in den Secrets.")
     st.stop()
 
 genai.configure(api_key=api_key)
-ai_model = genai.GenerativeModel("gemini-1.5-pro")
+
+# AUTOMATISCHE MODELL-WAHL (Behebt den NotFound Fehler)
+def get_model():
+    try:
+        # Wir versuchen erst das Pro Modell mit vollem Pfad
+        return genai.GenerativeModel("models/gemini-1.5-pro")
+    except:
+        # Fallback auf Flash, falls Pro nicht verfügbar ist
+        return genai.GenerativeModel("models/gemini-1.5-flash")
+
+ai_model = get_model()
 
 @st.cache_resource
 def load_embedder():
@@ -54,11 +64,10 @@ embedder = load_embedder()
 chroma = chromadb.Client()
 
 VAULT = "vault_tgacode"
-if not os.path.exists(VAULT):
-    os.makedirs(VAULT)
+os.makedirs(VAULT, exist_ok=True)
 
 # =========================================================
-# FUNKTIONEN
+# HILFSFUNKTIONEN
 # =========================================================
 def read_pdf(file):
     text = ""
@@ -77,8 +86,7 @@ def index_project(project_path, project_id):
     
     for f in os.listdir(project_path):
         if f.lower().endswith(".pdf"):
-            full_path = os.path.join(project_path, f)
-            text = read_pdf(full_path)
+            text = read_pdf(os.path.join(project_path, f))
             words = text.split()
             chunks = [" ".join(words[i:i+400]) for i in range(0, len(words), 400)]
             if chunks:
@@ -91,7 +99,7 @@ def index_project(project_path, project_id):
 def query_project(project_id, query):
     try:
         collection = chroma.get_collection(project_id)
-        res = collection.query(query_embeddings=[embedder.encode(query).tolist()], n_results=8)
+        res = collection.query(query_embeddings=[embedder.encode(query).tolist()], n_results=5)
         return "\n".join(res["documents"][0])
     except: return "Kein Basiswissen gefunden."
 
@@ -108,7 +116,7 @@ def main():
         sel_f = st.selectbox("Firma", ["--"] + firmen)
         with st.expander("Firma anlegen"):
             nf = st.text_input("Firmenname")
-            if st.button("Anlegen", key="new_f"):
+            if st.button("Anlegen", key="btn_nf"):
                 os.makedirs(os.path.join(VAULT, nf), exist_ok=True)
                 st.rerun()
 
@@ -119,7 +127,7 @@ def main():
             sel_p = st.selectbox("Projekt", ["--"] + projekte)
             with st.expander("Projekt anlegen"):
                 np = st.text_input("Projektname")
-                if st.button("Anlegen", key="new_p"):
+                if st.button("Anlegen", key="btn_np"):
                     os.makedirs(os.path.join(VAULT, sel_f, np), exist_ok=True)
                     st.rerun()
     
@@ -138,14 +146,14 @@ def main():
         with t1:
             st.markdown("#### Dokumente verwalten")
             up = st.file_uploader("PDFs hochladen", accept_multiple_files=True)
-            col_a, col_b = st.columns(2)
-            if col_a.button("Speichern"):
+            ca, cb = st.columns(2)
+            if ca.button("Speichern"):
                 for f in up:
                     with open(os.path.join(path_p, f.name), "wb") as o: o.write(f.getbuffer())
                 st.rerun()
-            if col_b.button("Indexieren"):
+            if cb.button("📚 Wissen indexieren"):
                 index_project(path_p, project_id)
-                st.success("Wissen bereit.")
+                st.success("Projektwissen bereit.")
             
             for d in os.listdir(path_p):
                 cx, cy = st.columns([0.9, 0.1])
@@ -158,28 +166,36 @@ def main():
             st.markdown("#### Nachtrag prüfen")
             nt_files = st.file_uploader("Nachtrag + Anlagen", accept_multiple_files=True)
             
-            if st.button("Prüfung starten"):
-                with st.spinner("der TGAcode analysiert..."):
-                    nt_text = ""
-                    for f in nt_files: nt_text += read_pdf(f)
-                    kontext = query_project(project_id, nt_text[:1000])
-                    
-                    prompt = f"SYSTEM: Du bist 'der TGAcode'. Analysiere sachlich.\nKONTEXT:\n{kontext}\n\nNACHTRAG:\n{nt_text}\n\nSTRUKTUR: VOB-Check, Mengen-Check, Preis-Check, Empfehlung."
-                    res = ai_model.generate_content(prompt)
-                    st.session_state.last_audit = res.text
+            if st.button("🔥 Prüfung starten"):
+                if not nt_files:
+                    st.error("Bitte Nachtrag hochladen.")
+                else:
+                    with st.spinner("der TGAcode analysiert..."):
+                        nt_text = ""
+                        for f in nt_files: nt_text += read_pdf(f)
+                        kontext = query_project(project_id, nt_text[:1000])
+                        
+                        prompt = f"SYSTEM: Du bist 'der TGAcode'. Analysiere sachlich und ohne Floskeln.\n\nKONTEXT PROJEKT-AKTE:\n{kontext}\n\nNACHTRAGSDATEN:\n{nt_text}\n\nSTRUKTUR: VOB-Check, Mengen-Check, Preis-Check, Empfehlung."
+                        
+                        try:
+                            res = ai_model.generate_content(prompt)
+                            st.session_state.last_audit = res.text
+                        except Exception as e:
+                            st.error(f"KI Fehler: {e}")
 
             if "last_audit" in st.session_state:
+                st.markdown("### Ergebnis")
                 st.markdown(f"<div class='report-box'>{st.session_state.last_audit}</div>", unsafe_allow_html=True)
                 
                 st.divider()
-                st.markdown("#### Chat-Anweisung zum Ergebnis")
-                feedback = st.chat_input("Anweisung an der TGAcode...")
+                feedback = st.chat_input("Anweisung zur Korrektur an der TGAcode...")
                 if feedback:
-                    # Direkte Interaktion mit dem letzten Ergebnis
-                    new_prompt = f"Du hast diesen Bericht erstellt:\n{st.session_state.last_audit}\n\nAnweisung vom User: {feedback}\n\nÜberarbeite den Bericht entsprechend."
-                    new_res = ai_model.generate_content(new_prompt)
-                    st.session_state.last_audit = new_res.text
-                    st.rerun()
+                    with st.spinner("Wird überarbeitet..."):
+                        new_prompt = f"Bisheriger Bericht:\n{st.session_state.last_audit}\n\nAnweisung des Nutzers: {feedback}\n\nÜberarbeite den Bericht rein sachlich."
+                        new_res = ai_model.generate_content(new_prompt)
+                        st.session_state.last_audit = new_res.text
+                        st.rerun()
 
 if __name__ == "__main__":
     main()
+
