@@ -1,4 +1,6 @@
 streamlit
 google-generativeai
 PyPDF2
-fpdf
+chromadb
+sentence-transformers
+
