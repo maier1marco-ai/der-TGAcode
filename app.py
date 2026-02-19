@@ -3,8 +3,9 @@
 # - Stammdaten/Gedächtnis pro Projekt (_projekt_stammdaten.txt)
 # - Zwei-Agenten-Analyse (Analyst -> Fragen; Gutachter -> Prüfbericht + JSON)
 # - JSON-Zusammenfassung (markerbasiert) für Excel-Deckblatt
-# - Excel-Deckblatt (.xlsx) befüllen via openpyxl
-# - Robust gegen 429/Quota: Backoff, Modellrotation, Eco-Modus, Caching
+# - Excel-Deckblatt (.xlsx) befüllen via openpyxl (Upload + Repo-Fallback)
+# - Robust gegen 429/Quota (Backoff) und 404/Not Found (Modellrotation)
+# - Eco-Modus und Caching für Quota-Schonung
 # ==============================================================================
 
 import streamlit as st
@@ -52,47 +53,84 @@ except Exception as e:
     st.stop()
 
 # ==============================================================================
-# Helferfunktionen & Modelle
+# Dynamische Modellauswahl & Backoff
 # ==============================================================================
 
-# Modellreihenfolge – wir rotieren bei 429
-MODEL_CANDIDATES = [
-    "gemini-2.5-flash",
-    "gemini-1.5-flash",
-    "gemini-3-flash",
-]
+PREFERRED_ORDER = ("flash", "pro")  # bevorzuge schnelle "flash"-Modelle
+
+def discover_supported_models():
+    """
+    Fragt verfügbare Gemini-Modelle ab und filtert auf solche,
+    die generateContent unterstützen. Liefert sortierte Liste.
+    """
+    supported = []
+    try:
+        for m in genai.list_models():
+            name = getattr(m, "name", None)
+            methods = getattr(m, "supported_generation_methods", []) or []
+            if name and ("generateContent" in methods):
+                supported.append(name)
+    except Exception:
+        # Fallback-Liste ohne problematische 3er-Flash-Variante
+        supported = [
+            "gemini-2.0-flash",
+            "gemini-1.5-flash",
+            "gemini-1.5-pro",
+            "gemini-1.0-pro",
+        ]
+
+    # Sortiere: erst "flash", dann "pro", grob nach Version (Major)
+    def sort_key(n):
+        tier = 0 if "flash" in n else (1 if "pro" in n else 2)
+        # Grobe Versionsbewertung (Major)
+        import re
+        m = re.search(r"gemini-(\d+)", n)
+        major = int(m.group(1)) if m else 0
+        return (tier, -major)
+
+    return sorted(set(supported), key=sort_key)
 
 @st.cache_resource
 def get_models():
+    """Instanziert nutzbare Modelle basierend auf dynamischer Discovery."""
+    names = discover_supported_models()
     instances = []
-    for m in MODEL_CANDIDATES:
+    for name in names:
         try:
-            instances.append(genai.GenerativeModel(m))
+            instances.append(genai.GenerativeModel(name))
         except Exception:
             continue
-    return instances
+    return instances, names
 
-def generate_with_backoff(prompt, max_output_tokens=1536, temperature=0.3, attempts_per_model=3):
+def generate_with_backoff(prompt, max_output_tokens=1536, temperature=0.3, attempts_per_model=2):
     """
-    Führt generate_content aus, rotiert Modelle bei 429/Quota,
-    nutzt exponentiellen Backoff und liefert .text zurück.
+    generateContent mit Rotation bei 404/Not Found und Backoff bei 429/Quota.
+    Gibt resp.text zurück.
     """
-    models = get_models()
+    models, names = get_models()
     if not models:
-        raise RuntimeError("Keine Gemini-Modelle verfügbar (bitte Zugang in Google AI Studio prüfen).")
+        raise RuntimeError("Keine nutzbaren Gemini-Modelle gefunden. Prüfe API-Zugang/Billing.")
+
     last_err = None
-    for model in models:
+    for idx, model in enumerate(models):
+        model_name = names[idx]
         for i in range(attempts_per_model):
             try:
                 resp = model.generate_content(
                     prompt,
-                    generation_config={"max_output_tokens": max_output_tokens, "temperature": temperature},
+                    generation_config={
+                        "max_output_tokens": max_output_tokens,
+                        "temperature": temperature,
+                    },
                 )
+                st.sidebar.caption(f"KI-Modell verwendet: {model_name}")
                 return resp.text
             except Exception as e:
-                msg = str(e)
-                # Backoff nur bei 429/Quota
-                if "429" in msg or "quota" in msg.lower():
+                msg = str(e).lower()
+                if "404" in msg or "not found" in msg:
+                    last_err = e
+                    break  # direkt nächstes Modell
+                elif "429" in msg or "quota" in msg:
                     delay = min(2 ** i, 8)
                     time.sleep(delay)
                     last_err = e
@@ -101,6 +139,10 @@ def generate_with_backoff(prompt, max_output_tokens=1536, temperature=0.3, attem
                     last_err = e
                     break
     raise last_err if last_err else RuntimeError("KI-Generierung fehlgeschlagen.")
+
+# ==============================================================================
+# Helferfunktionen & Vektorindex
+# ==============================================================================
 
 @st.cache_resource
 def get_embedder():
@@ -111,7 +153,7 @@ def get_embedder():
         st.stop()
 
 def read_pdf(file):
-    """Extrahiert Textinhalt aus einer PDF-Datei."""
+    """Extrahiert Text aus PDF-Datei."""
     text = ""
     try:
         reader = PdfReader(file)
@@ -126,7 +168,7 @@ def read_pdf(file):
 def index_project(path, p_id, embedder, chroma_client):
     """Zerlegt PDFs in Chunks, berechnet Embeddings und legt sie in ChromaDB ab."""
     col = chroma_client.get_or_create_collection(p_id)
-    ids = col.get()["ids"]
+    ids = col.get().get("ids", [])
     if ids:
         col.delete(ids=ids)
     for f in os.listdir(path):
@@ -196,10 +238,10 @@ UI_CSS = """
 def main():
     st.markdown(UI_CSS, unsafe_allow_html=True)
 
-    # Eco-Modus: weniger KI-Aufrufe
+    # Eco-Modus: weniger KI-Aufrufe (überspringt Fragen-Agent)
     eco_mode = st.sidebar.toggle(
         "Eco-Modus (Quota-schonend)", value=False,
-        help="Reduziert KI-Aufrufe: Fragen-Phase wird übersprungen, Kontext über Nachtrags-Text."
+        help="Reduziert KI-Aufrufe: Fragen-Phase wird übersprungen, Kontext via Nachtragstext."
     )
 
     st.header("Projektauswahl")
@@ -307,7 +349,7 @@ def main():
                         if "cache_report" not in st.session_state:
                             st.session_state.cache_report = {}
 
-                        # Agent 1: Analyst (optional im Eco-Modus)
+                        # Agent 1: Analyst (optional, via Eco-Modus)
                         questions = []
                         if not eco_mode:
                             status.write("Agent 1 (Analyst): Untersucht den Nachtrag…")
@@ -341,6 +383,7 @@ def main():
                                     docs_block = "\n".join(res.get("documents", [[]])[0]) if res.get("documents") else ""
                                     final_ctx += f"Recherche-Ergebnis für Frage '{q}':\n{docs_block}\n\n---\n\n"
                             else:
+                                # Eco-/Fallback: nutze Nachtragstext als Query
                                 q_vec = embedder.encode(nt_text[:1000]).tolist()
                                 res = collection.query(query_embeddings=[q_vec], n_results=5)
                                 docs_block = "\n".join(res.get("documents", [[]])[0]) if res.get("documents") else ""
@@ -350,7 +393,7 @@ def main():
                             final_ctx = f"Fehler bei der Datenbeschaffung: {e}"
                             status.update(label="Agent 2: Kontextbeschaffung fehlgeschlagen", state="error")
 
-                        # Agent 2: Finaler Bericht + JSON (marker-basiert, ohne Backticks)
+                        # Agent 2: Finaler Bericht + JSON (markerbasiert, ohne Code-Fences)
                         status.write("Agent 2 (Gutachter): Erstellt den finalen Bericht…")
                         stammdaten_text = ""
                         stammdaten_path = os.path.join(p_path, "_projekt_stammdaten.txt")
@@ -379,16 +422,11 @@ def main():
 
                         ANWEISUNG:
                         1) Erstelle einen strukturierten Prüfbericht im Markdown-Format (Zusammenfassung, VOB-Check, Technik/Preis-Check, Empfehlung).
-                        2) Hänge ANSCHLIESSEND eine reine JSON-Zusammenfassung an – ohne Code-Fences oder weitere Erläuterungen –
-                           und zwar zwischen den Markern:
+                        2) Hänge ANSCHLIESSEND eine reine JSON-Zusammenfassung an – ohne Code-Fences – zwischen den Markern:
                            BEGIN_JSON
                            {{"vob_check": "...", "technische_pruefung": "...", "preis_check": "...",
                              "gesamtsumme_korrigiert": "...", "empfehlung": "...", "naechste_schritte": "..."}}
                            END_JSON
-
-                        Beachte:
-                        - Verwende die JSON-Schlüssel genau so: vob_check, technische_pruefung, preis_check, gesamtsumme_korrigiert, empfehlung, naechste_schritte.
-                        - Nach END_JSON dürfen keine weiteren Zeichen folgen.
                         """
                         try:
                             if nt_hash in st.session_state.cache_report:
@@ -421,7 +459,7 @@ def main():
 
                 template_file = st.file_uploader(
                     "Excel-Deckblatt hochladen (.xlsx bevorzugt)",
-                    type=None,  # akzeptiert alles, wir prüfen Endung selbst
+                    type=None,  # akzeptiert alles; wir prüfen die Endung selbst
                     accept_multiple_files=False,
                     help="Falls Upload blockiert ist, nutze die Vorlagen-Auswahl aus dem Repository unten."
                 )
@@ -445,15 +483,15 @@ def main():
 
                 # JSON extrahieren (zwischen BEGIN_JSON und END_JSON)
                 report_data = None
-                if "BEGIN_JSON" in st.session_state.report and "END_JSON" in st.session_state.report:
+                if "BEGIN_JSON" in report_text and "END_JSON" in report_text:
                     try:
-                        json_segment = st.session_state.report.split("BEGIN_JSON", 1)[1].split("END_JSON", 1)[0]
+                        json_segment = report_text.split("BEGIN_JSON", 1)[1].split("END_JSON", 1)[0]
                         report_data = json.loads(json_segment.strip())
                     except Exception as e:
                         st.error(f"JSON-Zusammenfassung konnte nicht gelesen werden: {e}")
                         report_data = None
                 else:
-                    st.info("Kein JSON-Block gefunden. Bitte erneut prüfen oder Eco-Modus deaktivieren.")
+                    st.info("Kein JSON-Block gefunden. Prüfe Eco-Modus/Prompt.")
 
                 if report_data:
                     workbook = None
