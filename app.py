@@ -1,8 +1,8 @@
 # ==============================================================================
 # der TGAcode – KI-gestützte Nachtragsprüfung (Streamlit)
 # - Stammdaten/Gedächtnis pro Projekt (_projekt_stammdaten.txt)
-# - Zwei-Agenten-Analyse (Analyst -> Fragen; Gutachter -> Prüfbericht + JSON)
-# - JSON-Zusammenfassung (markerbasiert) für Excel-Deckblatt
+# - Zwei-Agenten-Analyse (Analyst -> Fragen; Gutachter -> Prüfbericht)
+# - Separater Schritt: strukturierte JSON-Zusammenfassung (Schema-erzwungen)
 # - Excel-Deckblatt (.xlsx) befüllen via openpyxl (Upload + Repo-Fallback)
 # - Robust gegen 429/Quota (Backoff) und 404/Not Found (Modellrotation)
 # - Eco-Modus und Caching für Quota-Schonung
@@ -56,8 +56,6 @@ except Exception as e:
 # Dynamische Modellauswahl & Backoff
 # ==============================================================================
 
-PREFERRED_ORDER = ("flash", "pro")  # bevorzuge schnelle "flash"-Modelle
-
 def discover_supported_models():
     """
     Fragt verfügbare Gemini-Modelle ab und filtert auf solche,
@@ -71,7 +69,7 @@ def discover_supported_models():
             if name and ("generateContent" in methods):
                 supported.append(name)
     except Exception:
-        # Fallback-Liste ohne problematische 3er-Flash-Variante
+        # Fallback-Liste ohne potenziell eingeschränkte Modelle
         supported = [
             "gemini-2.0-flash",
             "gemini-1.5-flash",
@@ -79,10 +77,9 @@ def discover_supported_models():
             "gemini-1.0-pro",
         ]
 
-    # Sortiere: erst "flash", dann "pro", grob nach Version (Major)
-    def sort_key(n):
+    def sort_key(n: str):
+        # Bevorzuge "flash", dann "pro", grob nach Major-Version absteigend
         tier = 0 if "flash" in n else (1 if "pro" in n else 2)
-        # Grobe Versionsbewertung (Major)
         import re
         m = re.search(r"gemini-(\d+)", n)
         major = int(m.group(1)) if m else 0
@@ -139,6 +136,68 @@ def generate_with_backoff(prompt, max_output_tokens=1536, temperature=0.3, attem
                     last_err = e
                     break
     raise last_err if last_err else RuntimeError("KI-Generierung fehlgeschlagen.")
+
+def generate_json_with_backoff(prompt, json_schema, attempts_per_model=2):
+    """
+    Erzeugt strikt JSON mittels response_mime_type und response_schema.
+    Rotiert bei 404, nutzt Backoff bei 429. Gibt ein Python-Dict zurück.
+    """
+    models, names = get_models()
+    if not models:
+        raise RuntimeError("Keine nutzbaren Gemini-Modelle gefunden. Prüfe API-Zugang/Billing.")
+
+    last_err = None
+    for idx, model in enumerate(models):
+        model_name = names[idx]
+        for i in range(attempts_per_model):
+            try:
+                resp = model.generate_content(
+                    prompt,
+                    generation_config={
+                        "response_mime_type": "application/json",
+                        "response_schema": json_schema,
+                        "temperature": 0.2,
+                        "max_output_tokens": 512,
+                    },
+                )
+                st.sidebar.caption(f"KI (JSON): {model_name}")
+                return json.loads(resp.text)
+            except Exception as e:
+                msg = str(e).lower()
+                if "404" in msg or "not found" in msg:
+                    last_err = e
+                    break
+                elif "429" in msg or "quota" in msg:
+                    delay = min(2 ** i, 8)
+                    time.sleep(delay)
+                    last_err = e
+                    continue
+                else:
+                    last_err = e
+                    break
+    raise last_err if last_err else RuntimeError("Strukturierte JSON-Generierung fehlgeschlagen.")
+
+def summary_json_schema():
+    return {
+        "type": "object",
+        "properties": {
+            "vob_check": {"type": "string"},
+            "technische_pruefung": {"type": "string"},
+            "preis_check": {"type": "string"},
+            "gesamtsumme_korrigiert": {"type": "string"},
+            "empfehlung": {"type": "string"},
+            "naechste_schritte": {"type": "string"},
+        },
+        "required": [
+            "vob_check",
+            "technische_pruefung",
+            "preis_check",
+            "gesamtsumme_korrigiert",
+            "empfehlung",
+            "naechste_schritte",
+        ],
+        "additionalProperties": False,
+    }
 
 # ==============================================================================
 # Helferfunktionen & Vektorindex
@@ -393,7 +452,7 @@ def main():
                             final_ctx = f"Fehler bei der Datenbeschaffung: {e}"
                             status.update(label="Agent 2: Kontextbeschaffung fehlgeschlagen", state="error")
 
-                        # Agent 2: Finaler Bericht + JSON (markerbasiert, ohne Code-Fences)
+                        # Agent 2: Finaler Bericht (Markdown)
                         status.write("Agent 2 (Gutachter): Erstellt den finalen Bericht…")
                         stammdaten_text = ""
                         stammdaten_path = os.path.join(p_path, "_projekt_stammdaten.txt")
@@ -403,9 +462,13 @@ def main():
 
                         report_prompt = f"""
                         SYSTEM: Du bist 'der TGAcode', ein KI-Gutachter für TGA-Bauprojekte (VOB).
-                        DEINE AUFGABE: Erstelle einen finalen Prüfbericht und eine JSON-Zusammenfassung.
+                        DEINE AUFGABE: Erstelle einen finalen Prüfbericht im Markdown-Format mit:
+                        - Zusammenfassung (3-4 Stichpunkte)
+                        - VOB/B-Konformitäts-Check
+                        - Technische Prüfung & Preis-Check
+                        - Empfehlung & Nächste Schritte
 
-                        PROJEKT-STAMMDATEN (HÖCHSTE PRIORITÄT):
+                        PROJEKT-STAMMDATEN (höchste Priorität):
                         ---
                         {stammdaten_text}
                         ---
@@ -419,39 +482,74 @@ def main():
                         ---
                         {final_ctx}
                         ---
-
-                        ANWEISUNG:
-                        1) Erstelle einen strukturierten Prüfbericht im Markdown-Format (Zusammenfassung, VOB-Check, Technik/Preis-Check, Empfehlung).
-                        2) Hänge ANSCHLIESSEND eine reine JSON-Zusammenfassung an – ohne Code-Fences – zwischen den Markern:
-                           BEGIN_JSON
-                           {{"vob_check": "...", "technische_pruefung": "...", "preis_check": "...",
-                             "gesamtsumme_korrigiert": "...", "empfehlung": "...", "naechste_schritte": "..."}}
-                           END_JSON
                         """
                         try:
                             if nt_hash in st.session_state.cache_report:
                                 st.session_state.report = st.session_state.cache_report[nt_hash]
                             else:
                                 st.session_state.report = generate_with_backoff(
-                                    report_prompt, max_output_tokens=1536, temperature=0.2
+                                    report_prompt, max_output_tokens=1400, temperature=0.2
                                 )
                                 st.session_state.cache_report[nt_hash] = st.session_state.report
-                            status.update(label="Analyse abgeschlossen!", state="complete", expanded=False)
                         except Exception as e:
                             status.update(label=f"Berichtserstellung fehlgeschlagen: {e}", state="error")
+                            st.session_state.report = ""
 
-            # Berichtanzeige
+                        # Separater Schritt: strukturierte JSON-Zusammenfassung
+                        status.write("Agent 2 (Gutachter): Erstellt die strukturierte Zusammenfassung (JSON)…")
+
+                        json_prompt = f"""
+                        Erzeuge eine komprimierte, sachliche JSON-Zusammenfassung der Prüfung
+                        mit den Feldern: vob_check, technische_pruefung, preis_check,
+                        gesamtsumme_korrigiert, empfehlung, naechste_schritte.
+
+                        Nutze ausschließlich diese Quellen:
+                        1) Projekt-Stammdaten:
+                        {stammdaten_text}
+
+                        2) Nachtrag (Volltext; ggf. gekürzt):
+                        {nt_text[:10000]}
+
+                        3) Recherchierte Projekt-Kontexte (gekürzt):
+                        {final_ctx[:10000]}
+
+                        4) Eigener Bericht (Auszug):
+                        {st.session_state.report[:4000]}
+
+                        Formuliere kurze, klare Werte. Keine Erläuterung, nur die reinen Feldwerte.
+                        """
+                        st.session_state.json_prompt = json_prompt  # für spätere Regeneration speichern
+                        try:
+                            st.session_state.summary = generate_json_with_backoff(
+                                json_prompt,
+                                summary_json_schema()
+                            )
+                            status.update(label="Analyse abgeschlossen!", state="complete", expanded=False)
+                        except Exception as e:
+                            status.update(label=f"JSON-Erstellung fehlgeschlagen: {e}", state="error")
+                            st.session_state.summary = None
+
+            # Berichtanzeige + JSON-Status
             if "report" in st.session_state:
                 st.markdown("---")
                 st.subheader("Ergebnis der KI-Prüfung")
+                st.markdown(f"<div class='report-box'>{st.session_state.report}</div>", unsafe_allow_html=True)
 
-                # Berichtsteil (alles vor BEGIN_JSON)
-                report_text = st.session_state.report
-                if "BEGIN_JSON" in report_text:
-                    report_only = report_text.split("BEGIN_JSON")[0]
+                st.markdown("#### Strukturierte Zusammenfassung (JSON)")
+                if st.session_state.get("summary") is None:
+                    st.warning("Noch keine JSON-Zusammenfassung vorhanden.")
+                    if st.session_state.get("json_prompt"):
+                        if st.button("JSON-Zusammenfassung jetzt erzeugen (erneut)"):
+                            try:
+                                st.session_state.summary = generate_json_with_backoff(
+                                    st.session_state.json_prompt,
+                                    summary_json_schema()
+                                )
+                                st.success("JSON-Zusammenfassung erzeugt.")
+                            except Exception as e:
+                                st.error(f"JSON-Erstellung fehlgeschlagen: {e}")
                 else:
-                    report_only = report_text
-                st.markdown(f"<div class='report-box'>{report_only}</div>", unsafe_allow_html=True)
+                    st.code(json.dumps(st.session_state.summary, ensure_ascii=False, indent=2), language="json")
 
                 # Deckblatt aus Excel-Vorlage – Upload + Repo-Fallback
                 st.markdown("---")
@@ -481,17 +579,7 @@ def main():
                     )
                     use_repo_template = (selected_repo_template and selected_repo_template != "--")
 
-                # JSON extrahieren (zwischen BEGIN_JSON und END_JSON)
-                report_data = None
-                if "BEGIN_JSON" in report_text and "END_JSON" in report_text:
-                    try:
-                        json_segment = report_text.split("BEGIN_JSON", 1)[1].split("END_JSON", 1)[0]
-                        report_data = json.loads(json_segment.strip())
-                    except Exception as e:
-                        st.error(f"JSON-Zusammenfassung konnte nicht gelesen werden: {e}")
-                        report_data = None
-                else:
-                    st.info("Kein JSON-Block gefunden. Prüfe Eco-Modus/Prompt.")
+                report_data = st.session_state.get("summary")
 
                 if report_data:
                     workbook = None
