@@ -4,54 +4,94 @@ from PyPDF2 import PdfReader
 import google.generativeai as genai
 import chromadb
 from sentence_transformers import SentenceTransformer
+import time
 
-# --- DESIGN: der TGAcode ---
+# --- DESIGN V2: Modernes UI für TGAcode ---
 st.set_page_config(page_title="der TGAcode", layout="wide")
 st.markdown("""
 <style>
-.top-nav { background-color: #1a1c24; padding: 20px; color: white; border-bottom: 4px solid #00f2fe; margin-bottom: 30px; }
-.logo { font-size: 26px; font-weight: 800; }
-.accent { color: #00f2fe; }
-.report-box { background-color: #f8fafc; padding: 20px; border-radius: 8px; border: 1px solid #e2e8f0; }
-.stButton>button { background: #1a1c24; color: #00f2fe; border: 1px solid #00f2fe; width: 100%; font-weight: bold; }
+    /* Dunkles, modernes Farbschema */
+    body { color: #fafafa; background-color: #0d1117; }
+    .stApp { background-color: #0d1117; }
+    .st-emotion-cache-18ni7ap { background: #161b22; } /* Main container background */
+    .st-emotion-cache-16txtl3 { padding: 2rem 2rem; } /* Main padding */
+    h1, h2, h3 { color: #c9d1d9; }
+    
+    /* Top-Nav & Logo */
+    .top-nav {
+        background-color: #161b22;
+        padding: 1rem 2rem;
+        border-bottom: 2px solid #00f2fe;
+        margin-bottom: 2rem;
+        display: flex;
+        justify-content: space-between;
+        align-items: center;
+    }
+    .logo { font-size: 26px; font-weight: 800; color: #f0f6fc; }
+    .accent { color: #00f2fe; }
+
+    /* Buttons */
+    .stButton>button {
+        background: linear-gradient(45deg, #00f2fe, #2c7fff);
+        color: white;
+        border: none;
+        width: 100%;
+        font-weight: bold;
+        padding: 10px 0;
+        border-radius: 8px;
+        transition: transform 0.1s ease-in-out;
+    }
+    .stButton>button:hover {
+        transform: scale(1.02);
+        box-shadow: 0 0 15px #00f2fe;
+    }
+
+    /* Report Box */
+    .report-box { 
+        background-color: #161b22; 
+        padding: 25px; 
+        border-radius: 10px; 
+        border: 1px solid #30363d; 
+        line-height: 1.6;
+    }
+    .report-box h1, .report-box h3 {
+        border-bottom: 1px solid #30363d;
+        padding-bottom: 8px;
+    }
 </style>
-<div class="top-nav"><div class="logo">der <span class="accent">TGAcode</span></div></div>
+<div class="top-nav">
+    <div class="logo">der <span class="accent">TGAcode</span></div>
+    <div style="color: #8b949e;">AI-Powered Project Analysis</div>
+</div>
 """, unsafe_allow_html=True)
 
-# --- API & MODELL-WAHL (Update Feb 2026) ---
+
+# --- API & MODELL-WAHL (unverändert) ---
+# ... (dein restlicher Code für API, Modell, PDF-Reader etc. bleibt hier unverändert)
 api_key = st.secrets.get("GEMINI_API_KEY")
 if not api_key:
     st.error("API Key fehlt in Streamlit Secrets!")
     st.stop()
-
 genai.configure(api_key=api_key)
-
 def init_ai_model():
-    # Wir nutzen 2026 die stabilen Versionen der 2.5er und 3er Serie
     model_candidates = ["gemini-2.5-flash", "gemini-3-flash-preview", "gemini-1.5-flash"]
     for m in model_candidates:
         try:
             model = genai.GenerativeModel(m)
-            # Kurztest
             model.generate_content("ping", generation_config={"max_output_tokens": 1})
             return model
-        except:
-            continue
+        except: continue
     return None
-
 ai_model = init_ai_model()
 if not ai_model:
-    st.error("Kein unterstütztes Modell gefunden. Bitte 'gemini-2.5-flash' in Google AI Studio freischalten.")
+    st.error("Kein unterstütztes Modell gefunden.")
     st.stop()
-
 @st.cache_resource
 def get_embedder(): return SentenceTransformer("all-MiniLM-L6-v2")
 embedder = get_embedder()
 chroma = chromadb.Client()
 VAULT = "vault_tgacode"
 os.makedirs(VAULT, exist_ok=True)
-
-# --- LOGIK ---
 def read_pdf(file):
     text = ""
     try:
@@ -61,7 +101,6 @@ def read_pdf(file):
             if t: text += t + "\n"
     except: pass
     return text
-
 def index_project(path, p_id):
     col = chroma.get_or_create_collection(p_id)
     ids = col.get()["ids"]
@@ -75,152 +114,119 @@ def index_project(path, p_id):
                 col.add(ids=[f"{f}_{i}" for i in range(len(chunks))], documents=chunks, 
                         embeddings=[embedder.encode(c).tolist() for c in chunks])
 
-# --- UI ---
+# --- UI V2: Modernisierte Hauptfunktion ---
 def main():
-    c1, c2, c3 = st.columns(3)
-    firmen = [f for f in os.listdir(VAULT) if os.path.isdir(os.path.join(VAULT, f))]
+    st.header("Projektauswahl")
+    c1, c2 = st.columns([1, 2])
     
     with c1:
-        sel_f = st.selectbox("Firma", ["--"] + firmen)
-        with st.expander("Firma anlegen"):
-            nf = st.text_input("Name")
-            if st.button("Anlegen", key="f"):
-                os.makedirs(os.path.join(VAULT, nf), exist_ok=True); st.rerun()
+        firmen = [f for f in os.listdir(VAULT) if os.path.isdir(os.path.join(VAULT, f))]
+        sel_f = st.selectbox("Firma auswählen", ["--"] + firmen, label_visibility="collapsed")
+        
+        projekte = []
+        if sel_f != "--":
+            projekte = [p for p in os.listdir(os.path.join(VAULT, sel_f))]
+        sel_p = st.selectbox("Projekt auswählen", ["--"] + projekte, label_visibility="collapsed")
 
-    sel_p = "--"
-    if sel_f != "--":
-        projekte = [p for p in os.listdir(os.path.join(VAULT, sel_f))]
-        with c2:
-            sel_p = st.selectbox("Projekt", ["--"] + projekte)
-            with st.expander("Projekt anlegen"):
-                np = st.text_input("Projekt")
-                if st.button("Anlegen", key="p"):
-                    os.makedirs(os.path.join(VAULT, sel_f, np), exist_ok=True); st.rerun()
-    
-    if sel_p != "--":
+    with c2:
+        with st.expander("➕ Neues Projekt oder Firma anlegen"):
+            nc1, nc2 = st.columns(2)
+            with nc1:
+                nf = st.text_input("Neue Firma")
+                if st.button("Firma anlegen"):
+                    os.makedirs(os.path.join(VAULT, nf), exist_ok=True); st.rerun()
+            with nc2:
+                np_firma = st.selectbox("Für Firma", ["--"] + firmen)
+                np = st.text_input("Neues Projekt")
+                if st.button("Projekt anlegen") and np_firma != "--":
+                    os.makedirs(os.path.join(VAULT, np_firma, np), exist_ok=True); st.rerun()
+
+    st.markdown("---")
+
+    if sel_f != "--" and sel_p != "--":
         p_path = os.path.join(VAULT, sel_f, sel_p)
         p_id = f"{sel_f}_{sel_p}".replace(" ", "_")
-        t1, t2 = st.tabs(["📁 Projekt-Akte", "🚀 Prüfung"])
+        
+        st.header(f"Projekt-Dashboard: {sel_p}")
+        t1, t2 = st.tabs(["📁 Projekt-Akte", "🚀 Nachtrags-Prüfung"])
 
         with t1:
-            up = st.file_uploader("Upload", accept_multiple_files=True)
-            ca, cb = st.columns(2)
-            if ca.button("Speichern"):
-                for f in up:
-                    with open(os.path.join(p_path, f.name), "wb") as o: o.write(f.getbuffer())
-                st.rerun()
-            if cb.button("📚 Wissen indexieren"):
-                with st.spinner("Projektwissen wird indexiert..."):
-                    index_project(p_path, p_id)
-                st.success("Projektwissen bereit!")
-            
-            st.markdown("---")
-            st.subheader("Dokumente in der Akte")
-            for d in os.listdir(p_path):
-                cx, cy = st.columns([0.9, 0.1])
-                cx.code(d)
-                if cy.button("❌", key=d, help=f"Löscht die Datei {d}"): 
-                    os.remove(os.path.join(p_path, d))
+            st.subheader("Dokumente verwalten")
+            up = st.file_uploader("Neue Dokumente hochladen", accept_multiple_files=True, type="pdf")
+            if up:
+                if st.button("In Akte speichern"):
+                    for f in up:
+                        with open(os.path.join(p_path, f.name), "wb") as o: o.write(f.getbuffer())
                     st.rerun()
 
+            st.markdown("---")
+            col_a, col_b = st.columns([2,1])
+            with col_a:
+                st.subheader("Bestehende Dokumente")
+                docs = os.listdir(p_path)
+                if not docs:
+                    st.info("Noch keine Dokumente in dieser Akte.")
+                else:
+                    for d in docs:
+                        st.code(d)
+            with col_b:
+                st.subheader("Projekt-Wissen")
+                if st.button("📚 Wissen neu indexieren"):
+                    with st.spinner("Projektwissen wird analysiert und indexiert..."):
+                        index_project(p_path, p_id)
+                    st.success("Projektwissen ist auf dem neuesten Stand!")
+        
         with t2:
-            nt = st.file_uploader("Nachtrag PDF zur Prüfung hochladen", accept_multiple_files=True)
-            if st.button("🔥 Prüfung starten"):
+            st.subheader("Nachtrag zur Prüfung hochladen")
+            nt = st.file_uploader("Nachtrag PDF", accept_multiple_files=True, type="pdf", label_visibility="collapsed")
+            
+            if st.button("🔥 KI-Prüfung starten", type="primary"):
                 if not nt: 
                     st.warning("Bitte zuerst einen Nachtrag hochladen.")
                 else:
-                    # ==== NEUE, VERBESSERTE ANALYSE-LOGIK ====
-                    
-                    # STUFE 1: Nachtrag verstehen und Schlüsselfragen generieren
-                    with st.spinner("der TGAcode analysiert... (Stufe 1/2: Nachtrag verstehen)"):
+                    # HIER: Der zweistufige Agenten-Prozess mit st.status visualisiert
+                    with st.status("Starte KI-Analyse...", expanded=True) as status:
+                        status.write("Agent 1 (Analyst): Untersucht den Nachtrag...")
+                        time.sleep(1) # Nur für den Demo-Effekt
                         nt_text = "".join([read_pdf(f) for f in nt])
-
-                        question_prompt = f"""
-                        Du bist ein Analyst für TGA-Bauprojekte. Lies den folgenden Nachtrag.
-                        Identifiziere die 3-5 wichtigsten Kernpunkte oder Forderungen (z.B. neue Positionen, geänderte Mengen, neue Preise).
-                        Formuliere für jeden Kernpunkt eine präzise, eigenständige Frage, um im ursprünglichen Leistungsverzeichnis oder den Projektunterlagen relevante Informationen zu finden.
-                        Gib NUR die Liste der Fragen aus.
-
-                        NACHTRAG:
-                        {nt_text[:4000]}
-                        """
+                        question_prompt = f"Du bist ein Analyst für TGA-Bauprojekte. Lies den Nachtrag, identifiziere die 3-5 Kernforderungen und formuliere für jede eine präzise Frage, um relevante Infos in den Projektunterlagen zu finden. Gib NUR die Liste der Fragen aus.\n\nNACHTRAG:{nt_text[:4000]}"
+                        questions_response = ai_model.generate_content(question_prompt)
+                        questions = questions_response.text.strip().split('\n')
+                        status.update(label="Agent 1 (Analyst): Rechercheplan erstellt! ✅")
+                        
+                        status.write("Agent 2 (Gutachter): Sucht relevante Projektdaten...")
+                        time.sleep(1) # Nur für den Demo-Effekt
                         final_ctx = ""
                         try:
-                            # Generiere die Schlüsselfragen basierend auf dem Nachtrag
-                            questions_response = ai_model.generate_content(question_prompt)
-                            questions = questions_response.text.strip().split('\n')
-                            
-                            st.info(f"Folgende Fragen werden an die Projekt-Akte gestellt:\n{questions_response.text}")
-                            
-                            st.spinner("der TGAcode analysiert... (Stufe 2/2: Kontext suchen & Bericht erstellen)")
                             collection = chroma.get_collection(p_id)
-                            
-                            # Für jede Frage, suche den relevanten Kontext in der Vektordatenbank
                             for q in questions:
                                 if q.strip():
                                     res = collection.query(query_texts=[q], n_results=3)
-                                    final_ctx += f"Frage: {q}\nKontext:\n" + "\n".join(res["documents"][0]) + "\n\n---\n\n"
-
+                                    final_ctx += f"Recherche-Ergebnis für Frage '{q}':\n" + "\n".join(res["documents"][0]) + "\n\n---\n\n"
                         except Exception as e:
-                            st.error(f"Fehler bei der Kontextsuche: {e}. Nutze Fallback-Methode.")
-                            try:
-                                # Fallback zur alten Methode, falls die Fragengenerierung fehlschlägt
-                                res = chroma.get_collection(p_id).query(query_embeddings=[embedder.encode(nt_text[:500]).tolist()], n_results=5)
-                                final_ctx = "\n".join(res["documents"][0])
-                            except:
-                                final_ctx = "Kein Kontext für die Analyse vorhanden."
-                        
-                    # STUFE 2: Finalen Bericht mit strukturiertem Prompt und reichem Kontext generieren
-                    with st.spinner("Bericht wird erstellt..."):
-                        report_prompt = f"""
-                        SYSTEM: Du bist 'der TGAcode', ein hochpräziser KI-Assistent für die Analyse von Bauprojekten, spezialisiert auf deutsche TGA-Projekte und die VOB.
-                        Deine Aufgabe: Analysiere den folgenden Nachtrag objektiv und sachlich auf Basis des bereitgestellten Projekt-Kontexts.
+                            final_ctx = f"Fehler bei der Datenbeschaffung: {e}"
+                        status.update(label="Agent 2 (Gutachter): Daten aus Projekt-Akte geladen! ✅")
 
-                        PROJEKT-KONTEXT AUS DER PROJEKT-AKTE:
-                        ---
-                        {final_ctx}
-                        ---
-
-                        NACHTRAG (VOLLTEXT):
-                        ---
-                        {nt_text}
-                        ---
-
-                        ANWEISUNG: Erstelle einen detaillierten Prüfbericht. Nutze ausschließlich Markdown für die Formatierung. Halte dich exakt an die folgende Gliederung:
-
-                        # Prüfbericht zum Nachtrag
-
-                        ### **Zusammenfassung für das Management**
-                        *   Fasse die wichtigsten Ergebnisse und deine Kernempfehlung in 3-4 prägnanten Stichpunkten zusammen.
-
-                        ### **1. VOB/B-Konformitäts-Check**
-                        *   Prüfe die formale und sachliche Grundlage des Nachtrags gemäß VOB/B.
-                        *   Handelt es sich um eine berechtigte Forderung (z.B. geänderte Leistung nach § 2 Abs. 5, zusätzliche Leistung nach § 2 Abs. 6)?
-                        *   Gibt es formale Mängel oder Auffälligkeiten?
-
-                        ### **2. Technische Prüfung & Preis-Check**
-                        *   Vergleiche die technischen Spezifikationen und Mengen im Nachtrag mit dem Projekt-Kontext. Gibt es Abweichungen?
-                        *   Bewerte die angesetzten Preise. Sind sie marktüblich und angemessen? Hebe Positionen mit auffälligen Preisen hervor.
-                        *   Beziehe dich, wenn möglich, direkt auf den bereitgestellten Kontext.
-
-                        ### **3. Empfehlung & Nächste Schritte**
-                        *   Gib eine klare Handlungsempfehlung: Annahme, Annahme unter Vorbehalt, Verhandlung oder Ablehnung.
-                        *   Liste konkrete nächste Schritte auf (z.B. "Preisspiegel für Position X anfordern", "Technische Klärung für Bauteil Y mit Planer suchen").
-                        """
+                        status.write("Agent 2 (Gutachter): Erstellt den finalen Bericht...")
+                        time.sleep(1) # Nur für den Demo-Effekt
+                        report_prompt = f"SYSTEM: Du bist 'der TGAcode', ein KI-Gutachter für TGA-Bauprojekte (VOB). DEINE AUFGABE: Erstelle einen finalen Prüfbericht basierend auf dem Nachtrag und den Recherche-Ergebnissen. Halte dich exakt an die Gliederung (Zusammenfassung, VOB-Check, Technik/Preis-Check, Empfehlung) und nutze Markdown.\n\nDER ZU PRÜFENDE NACHTRAG:\n---\n{nt_text}\n---\n\nRECHERCHE-ERGEBNISSE AUS DER PROJEKT-AKTE:\n---\n{final_ctx}\n---"
                         st.session_state.report = ai_model.generate_content(report_prompt).text
-                        st.success("Analyse abgeschlossen!")
+                        status.update(label="Analyse abgeschlossen!", state="complete", expanded=False)
 
             if "report" in st.session_state:
                 st.markdown("---")
-                st.markdown(st.session_state.report, unsafe_allow_html=True)
+                st.subheader("Ergebnis der KI-Prüfung")
+                st.markdown(f"<div class='report-box'>{st.session_state.report}</div>", unsafe_allow_html=True)
                 
-                st.markdown("---")
-                instr = st.chat_input("Anweisung zur Überarbeitung des Berichts...")
-                if instr:
-                    with st.spinner("Bericht wird überarbeitet..."):
-                        refine_prompt = f"Bestehender Bericht:\n{st.session_state.report}\n\nAnweisung des Nutzers: {instr}\n\nBitte überarbeite den ursprünglichen Bericht sachlich und präzise gemäß der Anweisung. Behalte die ursprüngliche Markdown-Struktur bei."
-                        st.session_state.report = ai_model.generate_content(refine_prompt).text
-                    st.rerun()
+                with st.expander("Anweisung zur Überarbeitung geben"):
+                    instr = st.text_area("Deine Anweisung an die KI...", height=100)
+                    if st.button("Bericht überarbeiten lassen"):
+                        with st.spinner("Bericht wird überarbeitet..."):
+                            refine_prompt = f"Bestehender Bericht:\n{st.session_state.report}\n\nAnweisung des Nutzers: {instr}\n\nBitte überarbeite den ursprünglichen Bericht sachlich und präzise gemäß der Anweisung. Behalte die ursprüngliche Markdown-Struktur bei."
+                            st.session_state.report = ai_model.generate_content(refine_prompt).text
+                        st.rerun()
 
 if __name__ == "__main__":
     main()
+
+
