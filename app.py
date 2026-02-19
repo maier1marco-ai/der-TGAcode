@@ -1,17 +1,18 @@
 # ==============================================================================
-# der TGAcode – KI-gestützte Nachtragsprüfung (Streamlit)
+# der TGAcode – KI-gestützte Nachtragsprüfung mit robustem Rate-Limit-Handling
 # Features:
-# - Stammdaten/Gedächtnis pro Projekt (persistiert in _projekt_stammdaten.txt)
+# - Stammdaten/Gedächtnis pro Projekt (_projekt_stammdaten.txt)
 # - Zwei-Agenten-Analyse (Analyst -> Fragen; Gutachter -> Prüfbericht + JSON)
-# - JSON-Zusammenfassung für Deckblatt-Vorlagen
+# - JSON-Zusammenfassung für Excel-Deckblatt
 # - Excel-Deckblatt (.xlsx) befüllen via openpyxl
-# - Robuster Upload (type=None) + Fallback-Repo-Vorlagen unter templates/
+# - Robust gegen 429/Quota: Backoff, Modellrotation, Eco-Modus, Caching
 # ==============================================================================
 
 import streamlit as st
 import os
 import time
 import json
+import hashlib
 from io import BytesIO
 
 # Bibliotheken prüfen und laden
@@ -24,11 +25,11 @@ try:
 except ImportError as e:
     st.error(
         f"Eine benötigte Bibliothek fehlt: {e}. "
-        "Bitte prüfe deine requirements.txt (streamlit, PyPDF2, google-generativeai, chromadb, sentence-transformers, openpyxl)."
+        "Bitte prüfe requirements.txt (streamlit, PyPDF2, google-generativeai, chromadb, sentence-transformers, openpyxl)."
     )
     st.stop()
 
-# Seiten-Setup (vor UI-Aufbau)
+# Seiten-Setup
 st.set_page_config(page_title="der TGAcode", layout="wide")
 
 # ==============================================================================
@@ -55,18 +56,56 @@ except Exception as e:
 # Helferfunktionen & Modelle
 # ==============================================================================
 
+# Bevorzugte Modellreihenfolge (wir rotieren bei 429)
+MODEL_CANDIDATES = [
+    "gemini-2.5-flash",        # schnell, gute Qualität
+    "gemini-1.5-flash",        # fallback
+    "gemini-3-flash",          # ggf. limitierter Free-Tier; nur als letzter Versuch
+]
+
 @st.cache_resource
-def init_ai_model():
-    """Lädt und testet das Gemini-Modell."""
-    model_candidates = ["gemini-2.5-flash", "gemini-3-flash-preview", "gemini-1.5-flash"]
-    for m in model_candidates:
+def get_models():
+    """Instanziert verfügbare Modelle und liefert eine Liste nutzbarer Instanzen."""
+    instances = []
+    for m in MODEL_CANDIDATES:
         try:
-            model = genai.GenerativeModel(m)
-            model.generate_content("ping", generation_config={"max_output_tokens": 1})
-            return model
+            instances.append(genai.GenerativeModel(m))
         except Exception:
             continue
-    return None
+    return instances
+
+def generate_with_backoff(prompt, max_output_tokens=1536, temperature=0.3, attempts_per_model=3):
+    """
+    Führt generate_content aus, rotiert Modelle bei 429/Quota,
+    nutzt exponentiellen Backoff und liefert .text zurück.
+    """
+    models = get_models()
+    if not models:
+        raise RuntimeError("Keine Gemini-Modelle verfügbar (bitte Zugang in Google AI Studio prüfen).")
+
+    last_err = None
+    for model in models:
+        for i in range(attempts_per_model):
+            try:
+                resp = model.generate_content(
+                    prompt,
+                    generation_config={"max_output_tokens": max_output_tokens, "temperature": temperature},
+                )
+                return resp.text
+            except Exception as e:
+                msg = str(e)
+                # Bei Rate-Limit/Quota backoff, sonst auf nächstes Modell
+                if "429" in msg or "quota" in msg.lower():
+                    # Exponentieller Backoff: 1s, 2s, 4s (max 8s)
+                    delay = min(2 ** i, 8)
+                    time.sleep(delay)
+                    last_err = e
+                    continue
+                else:
+                    last_err = e
+                    break  # anderes Problem -> nächstes Modell
+    # Wenn wir hier ankommen, hat alles versagt
+    raise last_err if last_err else RuntimeError("KI-Generierung fehlgeschlagen.")
 
 @st.cache_resource
 def get_embedder():
@@ -110,13 +149,8 @@ def index_project(path, p_id, embedder, chroma_client):
                 )
 
 # Modelle/Clients laden
-ai_model = init_ai_model()
 embedder = get_embedder()
 chroma_client = chromadb.Client()
-
-if not ai_model:
-    st.error("Kein unterstütztes Gemini-Modell gefunden oder konnte nicht initialisiert werden.")
-    st.stop()
 
 # ==============================================================================
 # UI-Design (CSS)
@@ -167,6 +201,10 @@ UI_CSS = """
 # ==============================================================================
 def main():
     st.markdown(UI_CSS, unsafe_allow_html=True)
+
+    # Sidebar: Eco-Modus (weniger KI-Calls)
+    eco_mode = st.sidebar.toggle("Eco-Modus (Quota-schonend)", value=False,
+                                 help="Reduziert KI-Aufrufe: Fragen-Phase wird übersprungen, Kontext aus Nachtrags-Text.")
 
     st.header("Projektauswahl")
     c1, c2 = st.columns([1, 2])
@@ -263,47 +301,65 @@ def main():
                 if not nt:
                     st.warning("Bitte zuerst einen Nachtrag hochladen.")
                 else:
-                    # Agent 1: Analyst – Schlüsselfragen generieren
                     with st.status("Starte KI-Analyse...", expanded=True) as status:
-                        status.write("Agent 1 (Analyst): Untersucht den Nachtrag...")
-                        time.sleep(0.5)
+                        status.write("Vorbereitung…")
                         nt_text = "".join([read_pdf(f) for f in nt])
+                        nt_hash = hashlib.sha256(nt_text.encode("utf-8")).hexdigest()
 
-                        question_prompt = (
-                            "Du bist ein Analyst für TGA-Bauprojekte. Lies den Nachtrag, "
-                            "identifiziere die 3-5 Kernforderungen und formuliere für jede eine präzise Frage, "
-                            "um relevante Infos in den Projektunterlagen zu finden. Gib NUR die Liste der Fragen aus.\n\n"
-                            f"NACHTRAG:\n{nt_text[:4000]}"
-                        )
-                        try:
-                            questions_response = ai_model.generate_content(question_prompt)
-                            questions = [q.strip() for q in questions_response.text.strip().split("\n") if q.strip()]
-                        except Exception as e:
-                            questions = []
-                            st.error(f"Fehler bei der Fragengenerierung: {e}")
+                        # Session-Caches für Quota-schonendes Arbeiten
+                        if "cache_questions" not in st.session_state:
+                            st.session_state.cache_questions = {}
+                        if "cache_report" not in st.session_state:
+                            st.session_state.cache_report = {}
 
-                        status.update(label="Agent 1 (Analyst): Rechercheplan erstellt! ✅")
+                        # Agent 1 (optional, je nach Eco-Modus)
+                        questions = []
+                        if not eco_mode:
+                            status.write("Agent 1 (Analyst): Untersucht den Nachtrag…")
+                            question_prompt = (
+                                "Du bist ein Analyst für TGA-Bauprojekte. Lies den Nachtrag, "
+                                "identifiziere die 3-5 Kernforderungen und formuliere für jede eine präzise Frage, "
+                                "um relevante Infos in den Projektunterlagen zu finden. Gib NUR die Liste der Fragen aus.\n\n"
+                                f"NACHTRAG:\n{nt_text[:4000]}"
+                            )
+                            try:
+                                if nt_hash in st.session_state.cache_questions:
+                                    questions = st.session_state.cache_questions[nt_hash]
+                                else:
+                                    q_text = generate_with_backoff(question_prompt, max_output_tokens=512, temperature=0.2)
+                                    questions = [q.strip() for q in q_text.strip().split("\n") if q.strip()]
+                                    st.session_state.cache_questions[nt_hash] = questions
+                                status.update(label="Agent 1 (Analyst): Rechercheplan erstellt! ✅")
+                            except Exception as e:
+                                status.update(label="Agent 1: Fragengenerierung fehlgeschlagen – Eco-Fallback aktiv", state="error")
+                                questions = []
 
-                        # Agent 2: Kontextbeschaffung aus Chroma mittels Embeddings
-                        status.write("Agent 2 (Gutachter): Sucht relevante Projektdaten...")
-                        time.sleep(0.5)
+                        # Agent 2: Kontextbeschaffung
+                        status.write("Agent 2 (Gutachter): Sucht relevante Projektdaten…")
                         final_ctx = ""
                         try:
                             collection = chroma_client.get_or_create_collection(p_id)
-                            for q in questions:
-                                q_vec = embedder.encode(q).tolist()
-                                res = collection.query(query_embeddings=[q_vec], n_results=3)
+                            if questions:
+                                for q in questions:
+                                    q_vec = embedder.encode(q).tolist()
+                                    res = collection.query(query_embeddings=[q_vec], n_results=3)
+                                    docs_block = "\n".join(res.get("documents", [[]])[0]) if res.get("documents") else ""
+                                    final_ctx += f"Recherche-Ergebnis für Frage '{q}':\n{docs_block}\n\n---\n\n"
+                            else:
+                                # Eco-Modus oder Fallback: nutze Nachtrags-Text als Query
+                                q_vec = embedder.encode(nt_text[:1000]).tolist()
+                                res = collection.query(query_embeddings=[q_vec], n_results=5)
                                 docs_block = "\n".join(res.get("documents", [[]])[0]) if res.get("documents") else ""
-                                final_ctx += f"Recherche-Ergebnis für Frage '{q}':\n{docs_block}\n\n---\n\n"
+                                final_ctx += f"Kontext (Eco/Fallback):\n{docs_block}\n\n---\n\n"
+                            status.update(label="Agent 2 (Gutachter): Daten aus Projekt-Akte geladen! ✅")
                         except Exception as e:
                             final_ctx = f"Fehler bei der Datenbeschaffung: {e}"
-                        status.update(label="Agent 2 (Gutachter): Daten aus Projekt-Akte geladen! ✅")
+                            status.update(label="Agent 2: Kontextbeschaffung fehlgeschlagen", state="error")
 
-                        # Agent 2: Finaler Prüfbericht + JSON-Zusammenfassung
-                        status.write("Agent 2 (Gutachter): Erstellt den finalen Bericht...")
-                        time.sleep(0.5)
-
+                        # Agent 2: Finaler Bericht + JSON
+                        status.write("Agent 2 (Gutachter): Erstellt den finalen Bericht…")
                         stammdaten_text = ""
+                        stammdaten_path = os.path.join(p_path, "_projekt_stammdaten.txt")
                         if os.path.exists(stammdaten_path):
                             with open(stammdaten_path, "r", encoding="utf-8") as f:
                                 stammdaten_text = f.read()
@@ -344,10 +400,16 @@ def main():
                         ```
                         """
                         try:
-                            st.session_state.report = ai_model.generate_content(report_prompt).text
+                            if nt_hash in st.session_state.cache_report:
+                                st.session_state.report = st.session_state.cache_report[nt_hash]
+                            else:
+                                st.session_state.report = generate_with_backoff(
+                                    report_prompt, max_output_tokens=1536, temperature=0.2
+                                )
+                                st.session_state.cache_report[nt_hash] = st.session_state.report
+                            status.update(label="Analyse abgeschlossen!", state="complete", expanded=False)
                         except Exception as e:
-                            st.error(f"Fehler bei der Berichtserstellung: {e}")
-                        status.update(label="Analyse abgeschlossen!", state="complete", expanded=False)
+                            status.update(label=f"Berichtserstellung fehlgeschlagen: {e}", state="error")
 
             # Berichtanzeige
             if "report" in st.session_state:
@@ -452,3 +514,4 @@ def main():
 # Start
 if __name__ == "__main__":
     main()
+```**_
