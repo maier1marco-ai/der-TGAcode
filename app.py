@@ -1,90 +1,68 @@
-# ==============================================================================
-# 1. IMPORTE
-# Alle benötigten Bibliotheken werden hier geladen.
-# ==============================================================================
 import streamlit as st
 import os
+from PyPDF2 import PdfReader
+import google.generativeai as genai
+import chromadb
+from sentence_transformers import SentenceTransformer
 import time
 import json
+import openpyxl
 from io import BytesIO
 
-# Versuche, die Bibliotheken zu importieren und gib eine klare Fehlermeldung, falls sie fehlen
-try:
-    from PyPDF2 import PdfReader
-    import google.generativeai as genai
-    import chromadb
-    from sentence_transformers import SentenceTransformer
-    import openpyxl
-except ImportError as e:
-    st.error(f"Eine benötigte Bibliothek fehlt: {e}. Bitte stelle sicher, dass deine requirements.txt-Datei korrekt ist und alle Pakete enthält (streamlit, PyPDF2, google-generativeai, chromadb, sentence-transformers, openpyxl).")
+# --- DESIGN V2: Modernes UI für TGAcode ---
+st.set_page_config(page_title="der TGAcode", layout="wide")
+st.markdown("""
+<style>
+    /* CSS bleibt hier wie im letzten Code-Snippet */
+    body { color: #fafafa; background-color: #0d1117; }
+    .stApp { background-color: #0d1117; }
+    .st-emotion-cache-18ni7ap { background: #161b22; }
+    .st-emotion-cache-16txtl3 { padding: 2rem 2rem; }
+    h1, h2, h3 { color: #c9d1d9; }
+    .top-nav { background-color: #161b22; padding: 1rem 2rem; border-bottom: 2px solid #00f2fe; margin-bottom: 2rem; display: flex; justify-content: space-between; align-items: center; }
+    .logo { font-size: 26px; font-weight: 800; color: #f0f6fc; }
+    .accent { color: #00f2fe; }
+    .stButton>button { background: linear-gradient(45deg, #00f2fe, #2c7fff); color: white; border: none; width: 100%; font-weight: bold; padding: 10px 0; border-radius: 8px; transition: transform 0.1s ease-in-out; }
+    .stButton>button:hover { transform: scale(1.02); box-shadow: 0 0 15px #00f2fe; }
+    .report-box { background-color: #161b22; padding: 25px; border-radius: 10px; border: 1px solid #30363d; line-height: 1.6; }
+    .report-box h1, .report-box h3 { border-bottom: 1px solid #30363d; padding-bottom: 8px; }
+</style>
+<div class="top-nav">
+    <div class="logo">der <span class="accent">TGAcode</span></div>
+    <div style="color: #8b949e;">AI-Powered Project Analysis</div>
+</div>
+""", unsafe_allow_html=True)
+
+
+# --- GLOBALE VARIABLEN & INITIALISIERUNG ---
+# Diese Definitionen müssen am Anfang des Skripts stehen, außerhalb von main()
+api_key = st.secrets.get("GEMINI_API_KEY")
+if not api_key:
+    st.error("API Key fehlt in Streamlit Secrets!")
     st.stop()
+genai.configure(api_key=api_key)
+
+VAULT = "vault_tgacode" # WICHTIG: Definition von VAULT
+os.makedirs(VAULT, exist_ok=True)
 
 
-# ==============================================================================
-# 2. KONFIGURATION & GLOBALE VARIABLEN
-# Alle "Einstellungen" und globalen Variablen werden hier EINMAL definiert.
-# ==============================================================================
-
-# Der Name des Hauptordners für alle Projektdaten
-VAULT = "vault_tgacode"
-
-# Erstelle den Hauptordner, falls er nicht existiert
-# Wichtiger Hinweis: In der Streamlit Cloud ist dies nur temporär!
-try:
-    os.makedirs(VAULT, exist_ok=True)
-except Exception as e:
-    st.error(f"Konnte das Verzeichnis '{VAULT}' nicht erstellen. Fehler: {e}")
-    st.stop()
-
-# Konfiguriere den Google Gemini API Key aus den Streamlit Secrets
-try:
-    api_key = st.secrets.get("GEMINI_API_KEY")
-    if not api_key:
-        raise ValueError("GEMINI_API_KEY nicht in Streamlit Secrets gefunden.")
-    genai.configure(api_key=api_key)
-except Exception as e:
-    st.error(f"Fehler bei der Konfiguration des Gemini API Keys: {e}")
-    st.stop()
-
-
-# ==============================================================================
-# 3. HELFERFUNKTIONEN & MODELLE LADEN
-# Diese Funktionen und Modelle werden von der Haupt-App verwendet.
-# ==============================================================================
-
+# --- HELFERFUNKTIONEN & MODELLE ---
 @st.cache_resource
 def init_ai_model():
-    """Lädt und testet das Gemini-Modell."""
     model_candidates = ["gemini-2.5-flash", "gemini-3-flash-preview", "gemini-1.5-flash"]
     for m in model_candidates:
         try:
             model = genai.GenerativeModel(m)
             model.generate_content("ping", generation_config={"max_output_tokens": 1})
             return model
-        except Exception:
-            continue
+        except: continue
     return None
 
 @st.cache_resource
 def get_embedder():
-    """Lädt das Sentence-Transformer-Modell für die Vektorisierung."""
-    try:
-        return SentenceTransformer("all-MiniLM-L6-v2")
-    except Exception as e:
-        st.error(f"Fehler beim Laden des Embedding-Modells: {e}")
-        st.stop()
-
-# Lade die KI-Modelle und den ChromaDB-Client beim Start der App
-ai_model = init_ai_model()
-embedder = get_embedder()
-chroma = chromadb.Client()
-
-if not ai_model:
-    st.error("Kein unterstütztes Gemini-Modell gefunden oder konnte nicht initialisiert werden.")
-    st.stop()
+    return SentenceTransformer("all-MiniLM-L6-v2")
 
 def read_pdf(file):
-    #... (Diese Funktion bleibt unverändert)
     text = ""
     try:
         reader = PdfReader(file)
@@ -95,7 +73,6 @@ def read_pdf(file):
     return text
 
 def index_project(path, p_id):
-    #... (Diese Funktion bleibt unverändert)
     col = chroma.get_or_create_collection(p_id)
     ids = col.get()["ids"]
     if ids: col.delete(ids=ids)
@@ -108,20 +85,22 @@ def index_project(path, p_id):
                 col.add(ids=[f"{f}_{i}" for i in range(len(chunks))], documents=chunks, 
                         embeddings=[embedder.encode(c).tolist() for c in chunks])
 
+# Globale Modelle laden
+ai_model = init_ai_model()
+embedder = get_embedder()
+chroma = chromadb.Client()
 
-# ==============================================================================
-# 4. HAUPTFUNKTION (DIE STREAMLIT APP-LOGIK)
-# Diese Funktion wird ganz am Ende aufgerufen und zeichnet die App-Oberfläche.
-# ==============================================================================
+if not ai_model:
+    st.error("Kein unterstütztes Gemini-Modell gefunden.")
+    st.stop()
+
+
+# --- HAUPTFUNKTION DER APP ---
 def main():
-    # Setze das Seiten-Design (CSS)
-    st.markdown("""<style>...</style><div class="top-nav">...</div>""", unsafe_allow_html=True) # Gekürzt
-
     st.header("Projektauswahl")
     c1, c2 = st.columns([1, 2])
     
     with c1:
-        # Dieser Aufruf wird jetzt funktionieren, da VAULT global definiert ist
         firmen = [f for f in os.listdir(VAULT) if os.path.isdir(os.path.join(VAULT, f))]
         sel_f = st.selectbox("Firma auswählen", ["--"] + firmen, label_visibility="collapsed")
         
@@ -130,9 +109,19 @@ def main():
             projekte = [p for p in os.listdir(os.path.join(VAULT, sel_f))]
         sel_p = st.selectbox("Projekt auswählen", ["--"] + projekte, label_visibility="collapsed")
 
-    # ... (Der Rest deiner main()-Funktion folgt hier, exakt wie im vorherigen Code)
-    # ... z.B. das Erstellen neuer Firmen/Projekte, die Tabs für "Projekt-Akte" und "Nachtrags-Prüfung", etc.
-    # Dieser Teil ist unverändert, ich kürze ihn hier zur besseren Übersicht.
+    with c2:
+        with st.expander("➕ Neues Projekt oder Firma anlegen"):
+            nc1, nc2 = st.columns(2)
+            with nc1:
+                nf = st.text_input("Neue Firma")
+                if st.button("Firma anlegen"):
+                    os.makedirs(os.path.join(VAULT, nf), exist_ok=True); st.rerun()
+            with nc2:
+                np_firma = st.selectbox("Für Firma", ["--"] + firmen)
+                np = st.text_input("Neues Projekt")
+                if st.button("Projekt anlegen") and np_firma != "--":
+                    os.makedirs(os.path.join(VAULT, np_firma, np), exist_ok=True); st.rerun()
+    st.markdown("---")
 
     if sel_f != "--" and sel_p != "--":
         p_path = os.path.join(VAULT, sel_f, sel_p)
@@ -142,18 +131,31 @@ def main():
         t1, t2 = st.tabs(["📁 Projekt-Akte", "🚀 Nachtrags-Prüfung"])
 
         with t1:
-            # ... Logik der Projekt-Akte ...
-            pass
-        
+            st.subheader("Stammdaten & Projekt-Regeln (Gedächtnis)")
+            stammdaten_path = os.path.join(p_path, "_projekt_stammdaten.txt")
+            current_stammdaten = ""
+            if os.path.exists(stammdaten_path):
+                with open(stammdaten_path, "r", encoding="utf-8") as f:
+                    current_stammdaten = f.read()
+            
+            stammdaten_input = st.text_area("Hier können permanente Regeln für dieses Projekt hinterlegt werden (z.B. 'Stundensatz Fa. Reiter ist 48€').", value=current_stammdaten, height=150)
+            if st.button("Stammdaten speichern"):
+                with open(stammdaten_path, "w", encoding="utf-8") as f:
+                    f.write(stammdaten_input)
+                st.success("Stammdaten wurden gespeichert!")
+            
+            st.markdown("---")
+            # ... (Rest der Projekt-Akte) ...
+
         with t2:
-            # ... Logik der Nachtrags-Prüfung ...
-            pass
+            st.subheader("Nachtrag zur Prüfung hochladen")
+            # ... (Logik der Nachtrags-Prüfung) ...
+            
+            if "report" in st.session_state:
+                st.markdown("---")
+                # ... (Anzeige des Reports und der Deckblatt-Funktion) ...
 
 
-# ==============================================================================
-# 5. STARTPUNKT DES SCRIPTS
-# Wenn das Skript direkt ausgeführt wird, rufe die main()-Funktion auf.
-# ==============================================================================
+# --- STARTPUNKT DES SKRIPTS ---
 if __name__ == "__main__":
     main()
-
