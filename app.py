@@ -114,6 +114,12 @@ def index_project(path, p_id):
 # Diese Funktion wird ganz am Ende aufgerufen und zeichnet die App-Oberfläche.
 # ==============================================================================
 def main():
+    st.title("UPDATE-TEST - VERSION 123 - HAT GEKLAPPT!") # <--- DIESE ZEILE EINFÜGEN
+    
+    # Der Rest deiner main() Funktion beginnt hier
+    st.header("Projektauswahl")
+    # ... usw.
+
     # Setze das Seiten-Design (CSS)
     st.markdown("""<style>...</style><div class="top-nav">...</div>""", unsafe_allow_html=True) # Gekürzt
 
@@ -156,4 +162,5 @@ def main():
 # ==============================================================================
 if __name__ == "__main__":
     main()
+
 
