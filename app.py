@@ -2,10 +2,11 @@
 # der TGAcode – KI-gestützte Nachtragsprüfung (Streamlit)
 # - Stammdaten/Gedächtnis pro Projekt (_projekt_stammdaten.txt)
 # - Zwei-Agenten-Analyse (Analyst -> Fragen; Gutachter -> Prüfbericht)
-# - Separater Schritt: strukturierte JSON-Zusammenfassung (Schema-erzwungen)
+# - Separater Schritt: strukturierte JSON-Zusammenfassung (Schema mit Fallback)
 # - Excel-Deckblatt (.xlsx) befüllen via openpyxl (Upload + Repo-Fallback)
 # - Robust gegen 429/Quota (Backoff) und 404/Not Found (Modellrotation)
 # - Eco-Modus und Caching für Quota-Schonung
+# - NEU: Korrekturen/Ergänzungen nach der Prüfung zur gezielten Überarbeitung
 # ==============================================================================
 
 import streamlit as st
@@ -137,47 +138,8 @@ def generate_with_backoff(prompt, max_output_tokens=1536, temperature=0.3, attem
                     break
     raise last_err if last_err else RuntimeError("KI-Generierung fehlgeschlagen.")
 
-def generate_json_with_backoff(prompt, json_schema, attempts_per_model=2):
-    """
-    Erzeugt strikt JSON mittels response_mime_type und response_schema.
-    Rotiert bei 404, nutzt Backoff bei 429. Gibt ein Python-Dict zurück.
-    """
-    models, names = get_models()
-    if not models:
-        raise RuntimeError("Keine nutzbaren Gemini-Modelle gefunden. Prüfe API-Zugang/Billing.")
-
-    last_err = None
-    for idx, model in enumerate(models):
-        model_name = names[idx]
-        for i in range(attempts_per_model):
-            try:
-                resp = model.generate_content(
-                    prompt,
-                    generation_config={
-                        "response_mime_type": "application/json",
-                        "response_schema": json_schema,
-                        "temperature": 0.2,
-                        "max_output_tokens": 512,
-                    },
-                )
-                st.sidebar.caption(f"KI (JSON): {model_name}")
-                return json.loads(resp.text)
-            except Exception as e:
-                msg = str(e).lower()
-                if "404" in msg or "not found" in msg:
-                    last_err = e
-                    break
-                elif "429" in msg or "quota" in msg:
-                    delay = min(2 ** i, 8)
-                    time.sleep(delay)
-                    last_err = e
-                    continue
-                else:
-                    last_err = e
-                    break
-    raise last_err if last_err else RuntimeError("Strukturierte JSON-Generierung fehlgeschlagen.")
-
 def summary_json_schema():
+    # Schlankes, kompatibles Schema – ohne additionalProperties
     return {
         "type": "object",
         "properties": {
@@ -195,9 +157,79 @@ def summary_json_schema():
             "gesamtsumme_korrigiert",
             "empfehlung",
             "naechste_schritte",
-        ],
-        "additionalProperties": False,
+        ]
     }
+
+def generate_json_with_backoff(prompt, json_schema=None, attempts_per_model=2):
+    """
+    Erzeugt JSON via response_mime_type=application/json.
+    1) Versucht Schema-Modus (wenn json_schema übergeben wird).
+    2) Bei Schema-Fehlern oder Nichtunterstützung: Fallback ohne Schema
+       + strikte Prompt-Vorgabe "Nur ein JSON-Objekt zurückgeben".
+    Gibt ein Python-Dict zurück.
+    """
+    models, names = get_models()
+    if not models:
+        raise RuntimeError("Keine nutzbaren Gemini-Modelle gefunden. Prüfe API-Zugang/Billing.")
+
+    def try_call(model, use_schema=True):
+        if use_schema and json_schema:
+            return model.generate_content(
+                prompt,
+                generation_config={
+                    "response_mime_type": "application/json",
+                    "response_schema": json_schema,
+                    "temperature": 0.2,
+                    "max_output_tokens": 512,
+                },
+            )
+        else:
+            strict_prompt = (
+                prompt
+                + "\n\nGib ausschließlich ein einzelnes, valides JSON-Objekt zurück – ohne Erklärtext, keine Code-Fences."
+            )
+            return model.generate_content(
+                strict_prompt,
+                generation_config={
+                    "response_mime_type": "application/json",
+                    "temperature": 0.2,
+                    "max_output_tokens": 512,
+                },
+            )
+
+    last_err = None
+    for idx, model in enumerate(models):
+        model_name = names[idx]
+        # Zweiphasig: (1) mit Schema, (2) ohne Schema
+        for phase in (True, False):
+            for i in range(attempts_per_model):
+                try:
+                    resp = try_call(model, use_schema=phase)
+                    st.sidebar.caption(f"KI (JSON): {model_name} | Schema={'on' if phase else 'off'}")
+                    return json.loads(resp.text)
+                except Exception as e:
+                    msg = str(e).lower()
+                    # 404 → direkt nächstes Modell
+                    if "404" in msg or "not found" in msg:
+                        last_err = e
+                        break
+                    # Schema nicht unterstützt → sofort in nächste Phase (ohne Schema)
+                    if phase and ("schema" in msg or "unknown field" in msg or "unsupported" in msg):
+                        last_err = e
+                        break
+                    # 429 / Quota → Backoff
+                    if "429" in msg or "quota" in msg:
+                        delay = min(2 ** i, 8)
+                        time.sleep(delay)
+                        last_err = e
+                        continue
+                    # Anderes Problem → nächster Versuch mit nächstem Modell/Phase
+                    last_err = e
+                    break
+            # Falls 404 oder Schema-Problem: Phase/Modell wechseln
+            if last_err and ("404" in str(last_err) or "schema" in str(last_err).lower() or "unknown field" in str(last_err).lower()):
+                continue
+    raise last_err if last_err else RuntimeError("Strukturierte JSON-Generierung fehlgeschlagen.")
 
 # ==============================================================================
 # Helferfunktionen & Vektorindex
@@ -452,14 +484,16 @@ def main():
                             final_ctx = f"Fehler bei der Datenbeschaffung: {e}"
                             status.update(label="Agent 2: Kontextbeschaffung fehlgeschlagen", state="error")
 
+                        # Für spätere Überarbeitungen merken:
+                        st.session_state.current_nt_text = nt_text
+                        st.session_state.current_final_ctx = final_ctx
+                        st.session_state.current_stammdaten_text = ""
+                        if os.path.exists(os.path.join(p_path, "_projekt_stammdaten.txt")):
+                            with open(os.path.join(p_path, "_projekt_stammdaten.txt"), "r", encoding="utf-8") as f:
+                                st.session_state.current_stammdaten_text = f.read()
+
                         # Agent 2: Finaler Bericht (Markdown)
                         status.write("Agent 2 (Gutachter): Erstellt den finalen Bericht…")
-                        stammdaten_text = ""
-                        stammdaten_path = os.path.join(p_path, "_projekt_stammdaten.txt")
-                        if os.path.exists(stammdaten_path):
-                            with open(stammdaten_path, "r", encoding="utf-8") as f:
-                                stammdaten_text = f.read()
-
                         report_prompt = f"""
                         SYSTEM: Du bist 'der TGAcode', ein KI-Gutachter für TGA-Bauprojekte (VOB).
                         DEINE AUFGABE: Erstelle einen finalen Prüfbericht im Markdown-Format mit:
@@ -470,17 +504,17 @@ def main():
 
                         PROJEKT-STAMMDATEN (höchste Priorität):
                         ---
-                        {stammdaten_text}
+                        {st.session_state.current_stammdaten_text}
                         ---
 
                         DER ZU PRÜFENDE NACHTRAG:
                         ---
-                        {nt_text}
+                        {st.session_state.current_nt_text}
                         ---
 
                         RECHERCHE-ERGEBNISSE AUS DER PROJEKT-AKTE:
                         ---
-                        {final_ctx}
+                        {st.session_state.current_final_ctx}
                         ---
                         """
                         try:
@@ -497,7 +531,6 @@ def main():
 
                         # Separater Schritt: strukturierte JSON-Zusammenfassung
                         status.write("Agent 2 (Gutachter): Erstellt die strukturierte Zusammenfassung (JSON)…")
-
                         json_prompt = f"""
                         Erzeuge eine komprimierte, sachliche JSON-Zusammenfassung der Prüfung
                         mit den Feldern: vob_check, technische_pruefung, preis_check,
@@ -505,24 +538,23 @@ def main():
 
                         Nutze ausschließlich diese Quellen:
                         1) Projekt-Stammdaten:
-                        {stammdaten_text}
+                        {st.session_state.current_stammdaten_text}
 
                         2) Nachtrag (Volltext; ggf. gekürzt):
-                        {nt_text[:10000]}
+                        {st.session_state.current_nt_text[:10000]}
 
                         3) Recherchierte Projekt-Kontexte (gekürzt):
-                        {final_ctx[:10000]}
+                        {st.session_state.current_final_ctx[:10000]}
 
                         4) Eigener Bericht (Auszug):
                         {st.session_state.report[:4000]}
 
                         Formuliere kurze, klare Werte. Keine Erläuterung, nur die reinen Feldwerte.
                         """
-                        st.session_state.json_prompt = json_prompt  # für spätere Regeneration speichern
+                        st.session_state.json_prompt = json_prompt  # für spätere Regeneration/Korrekturen speichern
                         try:
                             st.session_state.summary = generate_json_with_backoff(
-                                json_prompt,
-                                summary_json_schema()
+                                json_prompt, summary_json_schema()
                             )
                             status.update(label="Analyse abgeschlossen!", state="complete", expanded=False)
                         except Exception as e:
@@ -550,6 +582,74 @@ def main():
                                 st.error(f"JSON-Erstellung fehlgeschlagen: {e}")
                 else:
                     st.code(json.dumps(st.session_state.summary, ensure_ascii=False, indent=2), language="json")
+
+                # NEU: Korrekturen/Ergänzungen nach der Prüfung
+                st.markdown("---")
+                st.subheader("Korrekturen/Ergänzungen an der Prüfung")
+                corrections = st.text_area(
+                    "Teile der KI konkrete Änderungen mit (z. B. 'Stundenlohn Fa. Reiter ist 48 €, Position 3.1 Menge 12 statt 10').",
+                    placeholder="Kurze, präzise Hinweise eintragen..."
+                )
+                if st.button("Bericht und Zusammenfassung mit Korrekturen überarbeiten"):
+                    if corrections.strip():
+                        with st.spinner("Überarbeitung läuft…"):
+                            # Bericht verfeinern
+                            refine_report_prompt = f"""
+                            SYSTEM: Du bist 'der TGAcode', KI-Gutachter.
+                            Überarbeite den bestehenden Bericht sachlich und präzise anhand der Korrekturen des Nutzers.
+                            Behalte die gleiche Gliederung (Zusammenfassung, VOB-Check, Technik/Preis-Check, Empfehlung).
+
+                            Bestehender Bericht:
+                            ---
+                            {st.session_state.report[:6000]}
+                            ---
+
+                            Korrekturen des Nutzers:
+                            ---
+                            {corrections}
+                            ---
+
+                            Zusätzlicher Kontext (falls nötig):
+                            - Stammdaten: {st.session_state.get('current_stammdaten_text', '')[:2000]}
+                            - Nachtrag (Kurzfassung): {st.session_state.get('current_nt_text', '')[:3000]}
+                            - Recherche-Kontext: {st.session_state.get('current_final_ctx', '')[:3000]}
+                            """
+                            try:
+                                st.session_state.report = generate_with_backoff(
+                                    refine_report_prompt, max_output_tokens=1400, temperature=0.2
+                                )
+                                # JSON anhand des neuen Berichts und Korrekturen neu erzeugen
+                                refined_json_prompt = f"""
+                                Erzeuge eine komprimierte, sachliche JSON-Zusammenfassung der Prüfung
+                                mit den Feldern: vob_check, technische_pruefung, preis_check,
+                                gesamtsumme_korrigiert, empfehlung, naechste_schritte.
+
+                                Quellen:
+                                1) Projekt-Stammdaten:
+                                {st.session_state.get('current_stammdaten_text', '')}
+
+                                2) Nachtrag (Volltext; ggf. gekürzt):
+                                {st.session_state.get('current_nt_text', '')[:10000]}
+
+                                3) Recherchierte Projekt-Kontexte (gekürzt):
+                                {st.session_state.get('current_final_ctx', '')[:10000]}
+
+                                4) Überarbeiteter Bericht (Auszug):
+                                {st.session_state.report[:4000]}
+
+                                5) Korrekturen des Nutzers:
+                                {corrections}
+
+                                Keine Erläuterung, nur reine Feldwerte im JSON-Objekt.
+                                """
+                                st.session_state.summary = generate_json_with_backoff(
+                                    refined_json_prompt, summary_json_schema()
+                                )
+                                st.success("Bericht und JSON-Zusammenfassung wurden überarbeitet.")
+                            except Exception as e:
+                                st.error(f"Überarbeitung fehlgeschlagen: {e}")
+                    else:
+                        st.warning("Bitte konkrete Korrekturen/Ergänzungen eintragen.")
 
                 # Deckblatt aus Excel-Vorlage – Upload + Repo-Fallback
                 st.markdown("---")
