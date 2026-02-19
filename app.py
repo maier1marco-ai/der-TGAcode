@@ -1,9 +1,8 @@
 # ==============================================================================
-# der TGAcode – KI-gestützte Nachtragsprüfung mit robustem Rate-Limit-Handling
-# Features:
+# der TGAcode – KI-gestützte Nachtragsprüfung (Streamlit)
 # - Stammdaten/Gedächtnis pro Projekt (_projekt_stammdaten.txt)
 # - Zwei-Agenten-Analyse (Analyst -> Fragen; Gutachter -> Prüfbericht + JSON)
-# - JSON-Zusammenfassung für Excel-Deckblatt
+# - JSON-Zusammenfassung (markerbasiert) für Excel-Deckblatt
 # - Excel-Deckblatt (.xlsx) befüllen via openpyxl
 # - Robust gegen 429/Quota: Backoff, Modellrotation, Eco-Modus, Caching
 # ==============================================================================
@@ -56,16 +55,15 @@ except Exception as e:
 # Helferfunktionen & Modelle
 # ==============================================================================
 
-# Bevorzugte Modellreihenfolge (wir rotieren bei 429)
+# Modellreihenfolge – wir rotieren bei 429
 MODEL_CANDIDATES = [
-    "gemini-2.5-flash",        # schnell, gute Qualität
-    "gemini-1.5-flash",        # fallback
-    "gemini-3-flash",          # ggf. limitierter Free-Tier; nur als letzter Versuch
+    "gemini-2.5-flash",
+    "gemini-1.5-flash",
+    "gemini-3-flash",
 ]
 
 @st.cache_resource
 def get_models():
-    """Instanziert verfügbare Modelle und liefert eine Liste nutzbarer Instanzen."""
     instances = []
     for m in MODEL_CANDIDATES:
         try:
@@ -82,7 +80,6 @@ def generate_with_backoff(prompt, max_output_tokens=1536, temperature=0.3, attem
     models = get_models()
     if not models:
         raise RuntimeError("Keine Gemini-Modelle verfügbar (bitte Zugang in Google AI Studio prüfen).")
-
     last_err = None
     for model in models:
         for i in range(attempts_per_model):
@@ -94,22 +91,19 @@ def generate_with_backoff(prompt, max_output_tokens=1536, temperature=0.3, attem
                 return resp.text
             except Exception as e:
                 msg = str(e)
-                # Bei Rate-Limit/Quota backoff, sonst auf nächstes Modell
+                # Backoff nur bei 429/Quota
                 if "429" in msg or "quota" in msg.lower():
-                    # Exponentieller Backoff: 1s, 2s, 4s (max 8s)
                     delay = min(2 ** i, 8)
                     time.sleep(delay)
                     last_err = e
                     continue
                 else:
                     last_err = e
-                    break  # anderes Problem -> nächstes Modell
-    # Wenn wir hier ankommen, hat alles versagt
+                    break
     raise last_err if last_err else RuntimeError("KI-Generierung fehlgeschlagen.")
 
 @st.cache_resource
 def get_embedder():
-    """Lädt das Sentence-Transformer-Modell für Vektorisierung."""
     try:
         return SentenceTransformer("all-MiniLM-L6-v2")
     except Exception as e:
@@ -130,7 +124,7 @@ def read_pdf(file):
     return text
 
 def index_project(path, p_id, embedder, chroma_client):
-    """Zerlegt PDFs in Chunks, berechnet Embeddings und speichert sie in ChromaDB."""
+    """Zerlegt PDFs in Chunks, berechnet Embeddings und legt sie in ChromaDB ab."""
     col = chroma_client.get_or_create_collection(p_id)
     ids = col.get()["ids"]
     if ids:
@@ -202,9 +196,11 @@ UI_CSS = """
 def main():
     st.markdown(UI_CSS, unsafe_allow_html=True)
 
-    # Sidebar: Eco-Modus (weniger KI-Calls)
-    eco_mode = st.sidebar.toggle("Eco-Modus (Quota-schonend)", value=False,
-                                 help="Reduziert KI-Aufrufe: Fragen-Phase wird übersprungen, Kontext aus Nachtrags-Text.")
+    # Eco-Modus: weniger KI-Aufrufe
+    eco_mode = st.sidebar.toggle(
+        "Eco-Modus (Quota-schonend)", value=False,
+        help="Reduziert KI-Aufrufe: Fragen-Phase wird übersprungen, Kontext über Nachtrags-Text."
+    )
 
     st.header("Projektauswahl")
     c1, c2 = st.columns([1, 2])
@@ -244,7 +240,7 @@ def main():
         st.header(f"Projekt-Dashboard: {sel_p}")
         t1, t2 = st.tabs(["📁 Projekt-Akte", "🚀 Nachtrags-Prüfung"])
 
-        # Tab: Projekt-Akte (Stammdaten, Upload, Index)
+        # Tab 1 – Projekt-Akte
         with t1:
             st.subheader("Stammdaten & Projekt-Regeln (Gedächtnis)")
             stammdaten_path = os.path.join(p_path, "_projekt_stammdaten.txt")
@@ -254,9 +250,8 @@ def main():
                     current_stammdaten = f.read()
 
             stammdaten_input = st.text_area(
-                "Hier können permanente Regeln für dieses Projekt hinterlegt werden (z.B. 'Stundensatz Fa. Reiter ist 48€').",
-                value=current_stammdaten,
-                height=150,
+                "Permanente Regeln/Absprachen (z. B. 'Stundensatz Fa. Reiter ist 48 €').",
+                value=current_stammdaten, height=150
             )
             if st.button("Stammdaten speichern"):
                 os.makedirs(p_path, exist_ok=True)
@@ -292,7 +287,7 @@ def main():
                         index_project(p_path, p_id, embedder, chroma_client)
                     st.success("Projektwissen ist auf dem neuesten Stand!")
 
-        # Tab: Nachtrags-Prüfung (Zwei-Agenten-Analyse, Report, Deckblatt)
+        # Tab 2 – Nachtrags-Prüfung
         with t2:
             st.subheader("Nachtrag zur Prüfung hochladen")
             nt = st.file_uploader("Nachtrag PDF", accept_multiple_files=True, type="pdf", label_visibility="collapsed")
@@ -306,13 +301,13 @@ def main():
                         nt_text = "".join([read_pdf(f) for f in nt])
                         nt_hash = hashlib.sha256(nt_text.encode("utf-8")).hexdigest()
 
-                        # Session-Caches für Quota-schonendes Arbeiten
+                        # Session-Caches zur Quota-Reduzierung
                         if "cache_questions" not in st.session_state:
                             st.session_state.cache_questions = {}
                         if "cache_report" not in st.session_state:
                             st.session_state.cache_report = {}
 
-                        # Agent 1 (optional, je nach Eco-Modus)
+                        # Agent 1: Analyst (optional im Eco-Modus)
                         questions = []
                         if not eco_mode:
                             status.write("Agent 1 (Analyst): Untersucht den Nachtrag…")
@@ -330,7 +325,7 @@ def main():
                                     questions = [q.strip() for q in q_text.strip().split("\n") if q.strip()]
                                     st.session_state.cache_questions[nt_hash] = questions
                                 status.update(label="Agent 1 (Analyst): Rechercheplan erstellt! ✅")
-                            except Exception as e:
+                            except Exception:
                                 status.update(label="Agent 1: Fragengenerierung fehlgeschlagen – Eco-Fallback aktiv", state="error")
                                 questions = []
 
@@ -346,7 +341,6 @@ def main():
                                     docs_block = "\n".join(res.get("documents", [[]])[0]) if res.get("documents") else ""
                                     final_ctx += f"Recherche-Ergebnis für Frage '{q}':\n{docs_block}\n\n---\n\n"
                             else:
-                                # Eco-Modus oder Fallback: nutze Nachtrags-Text als Query
                                 q_vec = embedder.encode(nt_text[:1000]).tolist()
                                 res = collection.query(query_embeddings=[q_vec], n_results=5)
                                 docs_block = "\n".join(res.get("documents", [[]])[0]) if res.get("documents") else ""
@@ -356,7 +350,7 @@ def main():
                             final_ctx = f"Fehler bei der Datenbeschaffung: {e}"
                             status.update(label="Agent 2: Kontextbeschaffung fehlgeschlagen", state="error")
 
-                        # Agent 2: Finaler Bericht + JSON
+                        # Agent 2: Finaler Bericht + JSON (marker-basiert, ohne Backticks)
                         status.write("Agent 2 (Gutachter): Erstellt den finalen Bericht…")
                         stammdaten_text = ""
                         stammdaten_path = os.path.join(p_path, "_projekt_stammdaten.txt")
@@ -384,20 +378,17 @@ def main():
                         ---
 
                         ANWEISUNG:
-                        1. Erstelle einen strukturierten Prüfbericht im Markdown-Format (Zusammenfassung, VOB-Check, Technik/Preis-Check, Empfehlung).
-                        2. Füge ANSCHLIESSEND einen sauberen JSON-Codeblock an mit den Schlüsseln:
-                           "vob_check", "technische_prüfung", "preis_check", "gesamtsumme_korrigiert", "empfehlung", "naechste_schritte".
-                        Beispiel:
-                        ```json
-                        {{
-                            "vob_check": "OK",
-                            "technische_prüfung": "Prüfung nötig",
-                            "preis_check": "Auffällig",
-                            "gesamtsumme_korrigiert": "ca. 1.230,00 EUR",
-                            "empfehlung": "Verhandlung empfohlen",
-                            "naechste_schritte": "Preis für Position 3.2 anfechten; Technische Klärung für Bauteil X anfordern"
-                        }}
-                        ```
+                        1) Erstelle einen strukturierten Prüfbericht im Markdown-Format (Zusammenfassung, VOB-Check, Technik/Preis-Check, Empfehlung).
+                        2) Hänge ANSCHLIESSEND eine reine JSON-Zusammenfassung an – ohne Code-Fences oder weitere Erläuterungen –
+                           und zwar zwischen den Markern:
+                           BEGIN_JSON
+                           {{"vob_check": "...", "technische_pruefung": "...", "preis_check": "...",
+                             "gesamtsumme_korrigiert": "...", "empfehlung": "...", "naechste_schritte": "..."}}
+                           END_JSON
+
+                        Beachte:
+                        - Verwende die JSON-Schlüssel genau so: vob_check, technische_pruefung, preis_check, gesamtsumme_korrigiert, empfehlung, naechste_schritte.
+                        - Nach END_JSON dürfen keine weiteren Zeichen folgen.
                         """
                         try:
                             if nt_hash in st.session_state.cache_report:
@@ -415,13 +406,16 @@ def main():
             if "report" in st.session_state:
                 st.markdown("---")
                 st.subheader("Ergebnis der KI-Prüfung")
-                try:
-                    report_only = st.session_state.report.split("```json")[0]
-                except Exception:
-                    report_only = st.session_state.report
+
+                # Berichtsteil (alles vor BEGIN_JSON)
+                report_text = st.session_state.report
+                if "BEGIN_JSON" in report_text:
+                    report_only = report_text.split("BEGIN_JSON")[0]
+                else:
+                    report_only = report_text
                 st.markdown(f"<div class='report-box'>{report_only}</div>", unsafe_allow_html=True)
 
-                # Deckblatt aus Excel-Vorlage – robust (Upload + Repo-Fallback)
+                # Deckblatt aus Excel-Vorlage – Upload + Repo-Fallback
                 st.markdown("---")
                 st.subheader("Deckblatt aus Excel-Vorlage erstellen")
 
@@ -429,7 +423,7 @@ def main():
                     "Excel-Deckblatt hochladen (.xlsx bevorzugt)",
                     type=None,  # akzeptiert alles, wir prüfen Endung selbst
                     accept_multiple_files=False,
-                    help="Falls der Upload blockiert sein sollte, nutze die Vorlagen-Auswahl aus dem Repository unten."
+                    help="Falls Upload blockiert ist, nutze die Vorlagen-Auswahl aus dem Repository unten."
                 )
 
                 repo_templates_dir = "templates"
@@ -443,19 +437,23 @@ def main():
                 use_repo_template = False
                 selected_repo_template = None
                 if available_repo_templates:
-                    st.info("Alternativ kannst du eine Vorlage direkt aus dem Repository wählen.")
+                    st.info("Alternativ Vorlage direkt aus dem Repository wählen.")
                     selected_repo_template = st.selectbox(
                         "Vorlage aus Repository wählen", ["--"] + available_repo_templates
                     )
                     use_repo_template = (selected_repo_template and selected_repo_template != "--")
 
-                # JSON aus dem Report extrahieren
-                try:
-                    json_part = st.session_state.report.split('```json')[1].split('```')[0]
-                    report_data = json.loads(json_part)
-                except Exception as e:
-                    report_data = None
-                    st.error(f"JSON-Zusammenfassung konnte nicht gelesen werden: {e}")
+                # JSON extrahieren (zwischen BEGIN_JSON und END_JSON)
+                report_data = None
+                if "BEGIN_JSON" in st.session_state.report and "END_JSON" in st.session_state.report:
+                    try:
+                        json_segment = st.session_state.report.split("BEGIN_JSON", 1)[1].split("END_JSON", 1)[0]
+                        report_data = json.loads(json_segment.strip())
+                    except Exception as e:
+                        st.error(f"JSON-Zusammenfassung konnte nicht gelesen werden: {e}")
+                        report_data = None
+                else:
+                    st.info("Kein JSON-Block gefunden. Bitte erneut prüfen oder Eco-Modus deaktivieren.")
 
                 if report_data:
                     workbook = None
@@ -487,7 +485,14 @@ def main():
                         st.info("Keine Excel-Vorlage verfügbar. Bitte .xlsx hochladen oder Vorlage aus Repository wählen.")
                     else:
                         sheet = workbook.active
-                        placeholders = {f"[{k.upper()}]": str(v) for k, v in report_data.items()}
+                        placeholders = {
+                            "[VOB_CHECK]": str(report_data.get("vob_check", "")),
+                            "[TECHNISCHE_PRUEFUNG]": str(report_data.get("technische_pruefung", "")),
+                            "[PREIS_CHECK]": str(report_data.get("preis_check", "")),
+                            "[GESAMTSUMME_KORRIGIERT]": str(report_data.get("gesamtsumme_korrigiert", "")),
+                            "[EMPFEHLUNG]": str(report_data.get("empfehlung", "")),
+                            "[NAECHSTE_SCHRITTE]": str(report_data.get("naechste_schritte", "")),
+                        }
 
                         for row in sheet.iter_rows():
                             for cell in row:
@@ -500,7 +505,6 @@ def main():
                             workbook.save(output_stream)
                             output_stream.seek(0)
                             st.success("Excel-Vorlage erfolgreich befüllt!")
-
                             out_name = template_file.name if template_file else selected_repo_template
                             st.download_button(
                                 label="✅ Fertiges Deckblatt herunterladen",
@@ -514,4 +518,3 @@ def main():
 # Start
 if __name__ == "__main__":
     main()
-```**_
