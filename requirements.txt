@@ -1,7 +1,9 @@
 streamlit
-google-generativeai
 PyPDF2
+google-generativeai
 chromadb
 sentence-transformers
+openpyxl
+
 
 
